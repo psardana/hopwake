@@ -1,0 +1,19 @@
+# build output
+/bin/
+/dist/
+*.test
+*.out
+
+# editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# local data from the reference pipeline
+/reference/data/
+
+# environment files
+.env
+.env.*
+!.env.example
