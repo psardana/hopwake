@@ -101,6 +101,16 @@ services:
       postgres:
         condition: service_healthy
 
+  api:
+    build: ./api
+    environment:
+      API_DB: postgres://hopwake:hopwake@postgres:5432/reference
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   devicesim:
     build:
       context: ..

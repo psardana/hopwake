@@ -8,7 +8,14 @@ Planned path of a reading:
 devicesim ──► Mosquitto ──► bridge ──► Kafka ──► normaliser ──► aggregator ──► database ──► API ──► dashboard
 ```
 
-Built so far: the device simulator, Mosquitto, the bridge, Kafka, the normaliser and the aggregator.
+Built so far: the device simulator, Mosquitto, the bridge, Kafka, the normaliser, the aggregator, Postgres with the recorder, the API and the portal.
+
+```
+devicesim ──► Mosquitto ──► bridge ──► Kafka ──► normaliser ──► aggregator ──► recorder ──► Postgres ──► API ──► portal
+                                         telemetry.raw  telemetry.normalized  telemetry.site_minute
+```
+
+The portal is at http://localhost:8080.
 
 ## Run
 
@@ -63,6 +70,22 @@ Groups `telemetry.normalized` by site into one-minute windows. When a window clo
 ```
 
 Unit tests run during the image build (`mvn package`).
+
+## Recorder (Go) and Postgres
+
+Consumes `telemetry.normalized` and `telemetry.site_minute` and writes them to Postgres (`readings` and `site_minute`, see `postgres/init.sql`) in batches. A reading that arrives twice is stored once (primary key: device and sequence number). Offsets are committed only after a batch is written. Readings older than 24 hours are pruned.
+
+## API (TypeScript) and portal
+
+The API serves stored data, and the portal page at `/` is the end of the journey: what an operator sees.
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/sites` | The last closed minute of every site |
+| `GET /api/sites/{site}/minutes?limit=60` | Recent minutes of one site |
+| `GET /api/sites/{site}/devices` | Devices of a site with when each was last seen |
+| `GET /api/devices/{device}/readings?limit=50` | Latest readings of one device |
+| `GET /healthz` | Database reachable |
 
 ## Device simulator
 
