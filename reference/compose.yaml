@@ -70,6 +70,37 @@ services:
       kafka:
         condition: service_healthy
 
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: hopwake
+      POSTGRES_PASSWORD: hopwake
+      POSTGRES_DB: reference
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hopwake -d reference"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  recorder:
+    build:
+      context: ..
+      dockerfile: reference/go.Dockerfile
+      args:
+        CMD: recorder
+    environment:
+      RECORDER_KAFKA: kafka:29092
+      RECORDER_DB: postgres://hopwake:hopwake@postgres:5432/reference
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   devicesim:
     build:
       context: ..
