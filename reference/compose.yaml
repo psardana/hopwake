@@ -62,6 +62,14 @@ services:
       kafka:
         condition: service_healthy
 
+  aggregator:
+    build: ./aggregator
+    environment:
+      AGGREGATOR_KAFKA: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   devicesim:
     build:
       context: ..

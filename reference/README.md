@@ -8,7 +8,7 @@ Planned path of a reading:
 devicesim ──► Mosquitto ──► bridge ──► Kafka ──► normaliser ──► aggregator ──► database ──► API ──► dashboard
 ```
 
-Built so far: the device simulator, Mosquitto, the bridge, Kafka and the normaliser.
+Built so far: the device simulator, Mosquitto, the bridge, Kafka, the normaliser and the aggregator.
 
 ## Run
 
@@ -53,6 +53,16 @@ Reads `telemetry.raw` and writes `telemetry.normalized` in the platform's own fo
 ```json
 {"schema":"telemetry/v2","device":"dev-00198","site":"site-02","seq":182,"observed_at":"2026-11-18T07:03:29.33888131Z","temperature_k":299.85,"pressure_pa":100230,"vibration_mm_s":1.671}
 ```
+
+## Aggregator (Java, Kafka Streams)
+
+Groups `telemetry.normalized` by site into one-minute windows. When a window closes (10 seconds of grace), it writes the median temperature and pressure, the number of readings and the number of distinct devices to `telemetry.site_minute`, keyed by site. This is the many-to-one hop: one output stands for thousands of readings from dozens of devices.
+
+```json
+{"site":"site-00","window_start":"2026-11-18T07:10:00Z","window_end":"2026-11-18T07:11:00Z","readings":4516,"devices":75,"median_temperature_k":297.41,"median_pressure_pa":101320}
+```
+
+Unit tests run during the image build (`mvn package`).
 
 ## Device simulator
 
