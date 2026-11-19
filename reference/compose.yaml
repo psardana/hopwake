@@ -54,6 +54,14 @@ services:
       kafka:
         condition: service_healthy
 
+  normaliser:
+    build: ./normaliser
+    environment:
+      NORMALISER_KAFKA: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   devicesim:
     build:
       context: ..

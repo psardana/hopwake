@@ -8,7 +8,7 @@ Planned path of a reading:
 devicesim ──► Mosquitto ──► bridge ──► Kafka ──► normaliser ──► aggregator ──► database ──► API ──► dashboard
 ```
 
-Built so far: the device simulator, Mosquitto, the bridge and Kafka.
+Built so far: the device simulator, Mosquitto, the bridge, Kafka and the normaliser.
 
 ## Run
 
@@ -45,6 +45,14 @@ docker compose -f reference/compose.yaml down
 ## Bridge
 
 Subscribes to `$share/bridge/plant/+/+/telemetry` and produces each payload unchanged to `telemetry.raw`, keyed by the device ID from the MQTT topic. Headers: `mqtt_topic` and `bridge_received_at`. A shared subscription lets several bridges split the load.
+
+## Normaliser (Python)
+
+Reads `telemetry.raw` and writes `telemetry.normalized` in the platform's own format: fields are renamed, temperature moves to kelvin and pressure to pascal. Headers are passed on, with `normalised_at` added. Records that cannot be parsed go to `telemetry.dlq` with a `dlq_reason` header.
+
+```json
+{"schema":"telemetry/v2","device":"dev-00198","site":"site-02","seq":182,"observed_at":"2026-11-18T07:03:29.33888131Z","temperature_k":299.85,"pressure_pa":100230,"vibration_mm_s":1.671}
+```
 
 ## Device simulator
 
