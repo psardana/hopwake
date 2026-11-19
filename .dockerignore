@@ -1,0 +1,7 @@
+.git
+bin
+dist
+**/node_modules
+**/target
+**/__pycache__
+reference/data

@@ -8,13 +8,26 @@ Planned path of a reading:
 devicesim ──► Mosquitto ──► bridge ──► Kafka ──► normaliser ──► aggregator ──► database ──► API ──► dashboard
 ```
 
-Built so far: the device simulator, Mosquitto and Kafka.
+Built so far: the device simulator, Mosquitto, the bridge and Kafka.
 
 ## Run
 
 ```bash
-docker compose -f reference/compose.yaml up -d
-go run ./reference/devicesim -devices 1000 -interval 5s
+docker compose -f reference/compose.yaml up -d --build
+```
+
+The fleet size and reading interval come from `DEVICES` (default 1000) and `INTERVAL` (default 5s):
+
+```bash
+DEVICES=300 INTERVAL=1s docker compose -f reference/compose.yaml up -d --build
+```
+
+Read a few records from Kafka:
+
+```bash
+docker exec hopwake-reference-kafka-1 /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic telemetry.raw --max-messages 3 \
+  --property print.key=true --property print.headers=true
 ```
 
 Watch a few readings:
@@ -28,6 +41,10 @@ Stop everything:
 ```bash
 docker compose -f reference/compose.yaml down
 ```
+
+## Bridge
+
+Subscribes to `$share/bridge/plant/+/+/telemetry` and produces each payload unchanged to `telemetry.raw`, keyed by the device ID from the MQTT topic. Headers: `mqtt_topic` and `bridge_received_at`. A shared subscription lets several bridges split the load.
 
 ## Device simulator
 

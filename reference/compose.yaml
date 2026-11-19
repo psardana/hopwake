@@ -38,3 +38,29 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+
+  bridge:
+    build:
+      context: ..
+      dockerfile: reference/go.Dockerfile
+      args:
+        CMD: bridge
+    environment:
+      BRIDGE_MQTT: tcp://mosquitto:1883
+      BRIDGE_KAFKA: kafka:29092
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
+  devicesim:
+    build:
+      context: ..
+      dockerfile: reference/go.Dockerfile
+      args:
+        CMD: devicesim
+    command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-1000}", "-interval", "${INTERVAL:-5s}"]
+    depends_on:
+      mosquitto:
+        condition: service_healthy
