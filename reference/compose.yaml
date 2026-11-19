@@ -48,6 +48,11 @@ services:
     environment:
       BRIDGE_MQTT: tcp://mosquitto:1883
       BRIDGE_KAFKA: kafka:29092
+      FAULT_DEVICES: ${BRIDGE_FAULT_DEVICES:-}
+      FAULT_DROP: ${BRIDGE_FAULT_DROP:-0}
+      FAULT_DUPLICATE: ${BRIDGE_FAULT_DUPLICATE:-0}
+      FAULT_DELAY: ${BRIDGE_FAULT_DELAY:-0s}
+      FAULT_DELAY_RATE: ${BRIDGE_FAULT_DELAY_RATE:-0}
     depends_on:
       mosquitto:
         condition: service_healthy
@@ -58,6 +63,9 @@ services:
     build: ./normaliser
     environment:
       NORMALISER_KAFKA: kafka:29092
+      FAULT_DEVICES: ${NORMALISER_FAULT_DEVICES:-}
+      FAULT_DROP: ${NORMALISER_FAULT_DROP:-0}
+      FAULT_RENAME: ${NORMALISER_FAULT_RENAME:-0}
     depends_on:
       kafka:
         condition: service_healthy

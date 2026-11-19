@@ -42,7 +42,8 @@ func main() {
 	}
 	defer kc.Close()
 
-	var in, out, failed atomic.Uint64
+	flt := faultsFromEnv()
+	var in, out, failed, dropped atomic.Uint64
 	handler := func(_ mqtt.Client, m mqtt.Message) {
 		in.Add(1)
 		received := time.Now().UTC()
@@ -51,21 +52,37 @@ func main() {
 		if *deviceLevel < len(parts) {
 			key = parts[*deviceLevel]
 		}
-		rec := &kgo.Record{
-			Key:   []byte(key),
-			Value: append([]byte(nil), m.Payload()...),
-			Headers: []kgo.RecordHeader{
-				{Key: "mqtt_topic", Value: []byte(m.Topic())},
-				{Key: "bridge_received_at", Value: []byte(received.Format(time.RFC3339Nano))},
-			},
+		payload := append([]byte(nil), m.Payload()...)
+		drop, copies, delay := flt.decide(key, payload)
+		if drop {
+			dropped.Add(1)
+			return
 		}
-		kc.Produce(ctx, rec, func(_ *kgo.Record, err error) {
-			if err != nil {
-				failed.Add(1)
-				return
+		topic := m.Topic()
+		send := func() {
+			for i := 0; i < copies; i++ {
+				rec := &kgo.Record{
+					Key:   []byte(key),
+					Value: payload,
+					Headers: []kgo.RecordHeader{
+						{Key: "mqtt_topic", Value: []byte(topic)},
+						{Key: "bridge_received_at", Value: []byte(received.Format(time.RFC3339Nano))},
+					},
+				}
+				kc.Produce(ctx, rec, func(_ *kgo.Record, err error) {
+					if err != nil {
+						failed.Add(1)
+						return
+					}
+					out.Add(1)
+				})
 			}
-			out.Add(1)
-		})
+		}
+		if delay > 0 {
+			time.AfterFunc(delay, send)
+		} else {
+			send()
+		}
 	}
 
 	opts := mqtt.NewClientOptions().
@@ -95,10 +112,10 @@ func main() {
 			if err := kc.Flush(context.Background()); err != nil {
 				log.Printf("flush: %v", err)
 			}
-			log.Printf("stopped: %d received, %d produced, %d failed", in.Load(), out.Load(), failed.Load())
+			log.Printf("stopped: %d received, %d produced, %d failed, %d dropped by faults", in.Load(), out.Load(), failed.Load(), dropped.Load())
 			return
 		case <-report.C:
-			log.Printf("%d received, %d produced, %d failed", in.Load(), out.Load(), failed.Load())
+			log.Printf("%d received, %d produced, %d failed, %d dropped by faults", in.Load(), out.Load(), failed.Load(), dropped.Load())
 		}
 	}
 }

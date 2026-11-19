@@ -23,6 +23,47 @@ GROUP = os.environ.get("NORMALISER_GROUP", "normaliser")
 log = logging.getLogger("normaliser")
 
 
+class Faults:
+    """Failures injected on purpose, to reproduce lost and malformed data.
+
+    FAULT_DROP drops a share of readings; FAULT_RENAME renames temp_c the way an
+    unannounced firmware change would, which sends the reading to dead letters.
+    FAULT_DEVICES limits both to a comma-separated list of devices.
+    Each injected fault is logged as one JSON line.
+    """
+
+    def __init__(self, env=os.environ, rng=None):
+        import random
+        self.rng = rng or random.Random()
+        self.drop = float(env.get("FAULT_DROP") or 0)
+        self.rename = float(env.get("FAULT_RENAME") or 0)
+        self.devices = {d.strip() for d in (env.get("FAULT_DEVICES") or "").split(",") if d.strip()}
+        if self.drop or self.rename:
+            log.info("faults on: drop=%.3f rename=%.3f devices=%d (0 means all)", self.drop, self.rename, len(self.devices))
+
+    def applies(self, device: str) -> bool:
+        return bool(self.drop or self.rename) and (not self.devices or device in self.devices)
+
+    def apply(self, raw: dict):
+        """Return the reading to process, changed or not, or None to drop it."""
+        device = raw.get("device_id", "")
+        if not self.applies(device):
+            return raw
+        if self.rng.random() < self.drop:
+            self._log("drop", raw)
+            return None
+        if self.rng.random() < self.rename and "temp_c" in raw:
+            self._log("rename", raw)
+            raw = dict(raw)
+            raw["temperature"] = raw.pop("temp_c")
+        return raw
+
+    @staticmethod
+    def _log(kind: str, raw: dict) -> None:
+        log.info(json.dumps({"fault": kind, "hop": "normaliser", "device": raw.get("device_id"),
+                             "seq": raw.get("seq"), "at": datetime.now(timezone.utc).isoformat()}))
+
+
 def normalise(raw: dict) -> dict:
     return {
         "schema": "telemetry/v2",
@@ -60,7 +101,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    counts = {"in": 0, "out": 0, "dlq": 0}
+    faults = Faults()
+    counts = {"in": 0, "out": 0, "dlq": 0, "dropped": 0}
     last_report = time.monotonic()
     while running:
         msg = consumer.poll(0.5)
@@ -71,8 +113,12 @@ def main() -> None:
             counts["in"] += 1
             headers = list(msg.headers() or [])
             try:
-                out = normalise(json.loads(msg.value()))
-            except (ValueError, KeyError, TypeError) as exc:
+                raw = faults.apply(json.loads(msg.value()))
+                if raw is None:
+                    counts["dropped"] += 1
+                    continue
+                out = normalise(raw)
+            except (ValueError, KeyError, TypeError, AttributeError) as exc:
                 producer.produce(DLQ, key=msg.key(), value=msg.value(),
                                  headers=headers + [("dlq_reason", str(exc).encode()), ("dlq_at", now())])
                 counts["dlq"] += 1
@@ -82,12 +128,12 @@ def main() -> None:
                 counts["out"] += 1
             producer.poll(0)
         if time.monotonic() - last_report >= 10:
-            log.info("%(in)d consumed, %(out)d normalised, %(dlq)d to dead letters", counts)
+            log.info("%(in)d consumed, %(out)d normalised, %(dlq)d to dead letters, %(dropped)d dropped by faults", counts)
             last_report = time.monotonic()
 
     producer.flush(10)
     consumer.close()
-    log.info("stopped: %(in)d consumed, %(out)d normalised, %(dlq)d to dead letters", counts)
+    log.info("stopped: %(in)d consumed, %(out)d normalised, %(dlq)d to dead letters, %(dropped)d dropped by faults", counts)
 
 
 if __name__ == "__main__":

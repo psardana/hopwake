@@ -87,6 +87,34 @@ The API serves stored data, and the portal page at `/` is the end of the journey
 | `GET /api/devices/{device}/readings?limit=50` | Latest readings of one device |
 | `GET /healthz` | Database reachable |
 
+## Faults
+
+Faults reproduce the tickets Hopwake is meant to answer: data that never arrives, arrives late, arrives twice, or arrives in a shape the next hop rejects. They are off by default and set through environment variables when the stack starts. Every injected fault is logged as one JSON line with hop, device and sequence number, so there is a record of what really happened to check a tracer against.
+
+| Variable | Hop | Effect |
+| --- | --- | --- |
+| `BRIDGE_FAULT_DEVICES` | bridge | Comma-separated devices the bridge faults apply to (empty: all) |
+| `BRIDGE_FAULT_DROP` | bridge | Share of readings dropped, 0 to 1 |
+| `BRIDGE_FAULT_DUPLICATE` | bridge | Share of readings sent twice |
+| `BRIDGE_FAULT_DELAY`, `BRIDGE_FAULT_DELAY_RATE` | bridge | Hold a share of readings back for this long, which also reorders them |
+| `NORMALISER_FAULT_DEVICES` | normaliser | Devices the normaliser faults apply to (empty: all) |
+| `NORMALISER_FAULT_DROP` | normaliser | Share of readings dropped |
+| `NORMALISER_FAULT_RENAME` | normaliser | Share of readings with `temp_c` renamed, as an unannounced firmware change would; they end up in `telemetry.dlq` |
+
+Example: one device silently lost at the bridge, another broken at the normaliser.
+
+```bash
+BRIDGE_FAULT_DEVICES=dev-00042 BRIDGE_FAULT_DROP=1 \
+NORMALISER_FAULT_DEVICES=dev-00043 NORMALISER_FAULT_RENAME=1 \
+docker compose -f reference/compose.yaml up -d bridge normaliser
+```
+
+In the portal both devices stop updating while the rest of their site carries on. The fault log:
+
+```bash
+docker compose -f reference/compose.yaml logs bridge normaliser | grep '"fault"'
+```
+
 ## Device simulator
 
 Each device publishes JSON to `plant/<site>/<device>/telemetry` with a per-device sequence number:
