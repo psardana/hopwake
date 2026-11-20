@@ -4,58 +4,73 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Plant portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-  :root { --bg:#f4f6f8; --panel:#fff; --ink:#17202a; --quiet:#5d6b78; --line:#dde3e8; --accent:#0f6fbf; --ok:#1f8a4c; --stale:#b45309; --bad:#b42318; --mono: ui-monospace, Menlo, monospace; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#0f141a; --panel:#17202a; --ink:#e6edf3; --quiet:#93a1ae; --line:#2a3642; --accent:#58a6ff; --ok:#3fb950; --stale:#d29922; --bad:#f85149; } }
+  :root {
+    --bg:#fbfbfc; --panel:#ffffff; --line:#e7e7eb; --line2:#efeff2; --ink:#17171c; --quiet:#62626e;
+    --accent:#5e6ad2; --accent-bg:#eef0fd; --warn:#c2410c; --warn-dot:#ea7a35; --off:#d7d7de;
+    --mono:'JetBrains Mono', ui-monospace, Menlo, monospace;
+  }
+  :root[data-theme=dark] {
+    --bg:#0f0f12; --panel:#141418; --line:#25252c; --line2:#1d1d23; --ink:#ececf1; --quiet:#9b9ba8;
+    --accent:#8c94ff; --accent-bg:#1c1e33; --warn:#f39a5c; --warn-dot:#f39a5c; --off:#34343d;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-  header { padding:16px 24px; background:var(--panel); border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
-  h1 { margin:0; font-size:18px; }
-  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--quiet); margin:0 0 10px; }
-  main { padding:20px 24px; display:grid; gap:20px; max-width:1200px; }
-  .sites { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:14px; }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
-  .site { cursor:pointer; }
-  .site.sel { outline:2px solid var(--accent); }
-  .big { font-size:28px; font-weight:650; font-variant-numeric:tabular-nums; }
-  .meta { color:var(--quiet); font-size:12px; }
-  svg { display:block; width:100%; height:40px; margin-top:8px; }
-  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
-  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
-  th { color:var(--quiet); font-weight:600; }
-  td.mono { font-family:var(--mono); }
-  a { color:var(--accent); text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:6px; }
-  .ok { background:var(--ok); } .stale { background:var(--stale); } .gone { background:var(--bad); }
-  form { display:flex; gap:8px; margin-bottom:12px; }
-  input { font:inherit; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--ink); min-width:220px; }
-  button { font:inherit; font-weight:600; padding:7px 14px; border-radius:8px; border:0; background:var(--accent); color:#fff; cursor:pointer; }
-  .two { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
-  @media (max-width: 900px) { .two { grid-template-columns:1fr; } }
-  .scroll { max-height:420px; overflow:auto; }
-  .empty { color:var(--quiet); }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.5 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  button, input { font: inherit; color: inherit; }
+  header { height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-bottom: 1px solid var(--line); }
+  .quiet { color: var(--quiet); }
+  .btn { height: 30px; padding: 0 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; display: inline-flex; align-items: center; }
+  main { padding: 24px; display: flex; flex-direction: column; gap: 20px; max-width: 1280px; }
+  .sites { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .site { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 14px 16px; text-align: left; cursor: pointer; }
+  .site:hover { border-color: var(--quiet); }
+  .site.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .big { font-size: 26px; font-weight: 500; letter-spacing: -0.02em; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .site svg { display: block; width: 100%; height: 28px; margin-top: 6px; color: var(--accent); }
+  .panels { display: flex; gap: 20px; flex-wrap: wrap; align-items: flex-start; }
+  .panel { flex: 1 1 420px; min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); overflow: hidden; }
+  .phead { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 14px; }
+  .scroll { max-height: 520px; overflow: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 0 14px; height: 34px; border-top: 1px solid var(--line2); white-space: nowrap; }
+  th { color: var(--quiet); font-weight: 500; font-size: 11px; height: 28px; border-top-color: var(--line); position: sticky; top: 0; background: var(--panel); }
+  td.r, th.r { text-align: right; }
+  tr.pick { cursor: pointer; }
+  tr.pick:hover td { background: var(--line2); }
+  tr.sel td { background: var(--accent-bg); }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 8px; background: var(--off); vertical-align: 1px; }
+  .dot.bad { background: var(--warn-dot); }
+  .bad-text { color: var(--warn); }
+  .lookup { display: flex; gap: 8px; }
+  .lookup input { height: 30px; width: 180px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); font-family: var(--mono); font-size: 12px; }
+  .empty { padding: 14px; color: var(--quiet); }
 </style>
 </head>
 <body>
 <header>
-  <h1>Plant portal</h1>
-  <span class="meta" id="updated">Loading…</span>
+  <span style="font-weight:600">Plant portal</span>
+  <span class="quiet" id="summary"></span>
+  <span style="flex:1"></span>
+  <span class="quiet" id="updated">Loading…</span>
+  <button class="btn" id="themeBtn" type="button" aria-label="Switch light and dark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
 </header>
 <main>
-  <section>
-    <h2>Sites · median temperature, last closed minute</h2>
-    <div class="sites" id="sites"></div>
-  </section>
-  <div class="two">
-    <section class="card">
-      <h2 id="devicesTitle">Devices</h2>
+  <section class="sites" id="sites" aria-label="Sites"></section>
+  <div class="panels">
+    <section class="panel" aria-label="Devices">
+      <div class="phead"><span style="font-weight:500" id="devicesTitle">Devices</span><span class="quiet" id="silent"></span></div>
       <div class="scroll"><table><thead><tr><th>Device</th><th>Last seen</th><th>Last seq</th></tr></thead><tbody id="devices"></tbody></table></div>
     </section>
-    <section class="card">
-      <h2>Device readings</h2>
-      <form id="lookup"><input id="deviceId" placeholder="Device ID, e.g. dev-00042" autocomplete="off"><button>Show</button></form>
-      <div id="readings" class="scroll"><p class="empty">Pick a device from the list or enter its ID.</p></div>
+    <section class="panel" aria-label="Device readings">
+      <div class="phead">
+        <span style="font-weight:500" id="readingsTitle">Device readings</span>
+        <form class="lookup" id="lookup"><input id="deviceId" aria-label="Device ID" placeholder="dev-00042" autocomplete="off"><button class="btn" type="submit">Show</button></form>
+      </div>
+      <div class="scroll" id="readings"><div class="empty">Pick a device from the list or enter its ID.</div></div>
     </section>
   </div>
 </main>
@@ -63,51 +78,73 @@
 const $ = id => document.getElementById(id);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const get = async p => { const r = await fetch(p); if (!r.ok) throw new Error(`${p}: ${r.status}`); return r.json(); };
-const ago = iso => { const s = Math.round((Date.now() - new Date(iso)) / 1000); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`; };
-const freshness = iso => { const s = (Date.now() - new Date(iso)) / 1000; return s < 30 ? 'ok' : s < 300 ? 'stale' : 'gone'; };
-let site = null;
+const age = iso => (Date.now() - new Date(iso)) / 1000;
+const ago = iso => { const s = Math.max(0, Math.round(age(iso))); return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+const silent = iso => age(iso) > 30;
+let site = null, device = '';
+
+function applyTheme(t) { document.documentElement.dataset.theme = t; }
+let saved = null; try { saved = localStorage.getItem('portal-theme'); } catch {}
+const mq = window.matchMedia('(prefers-color-scheme: dark)');
+applyTheme(saved || (mq.matches ? 'dark' : 'light'));
+mq.addEventListener('change', e => { if (!saved) applyTheme(e.matches ? 'dark' : 'light'); });
+$('themeBtn').onclick = () => {
+  saved = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  applyTheme(saved);
+  try { localStorage.setItem('portal-theme', saved); } catch {}
+};
 
 function spark(points) {
-  if (points.length < 2) return '<svg></svg>';
+  if (points.length < 2) return '<svg aria-hidden="true"></svg>';
   const ys = points.map(p => p.median_temperature_c), lo = Math.min(...ys), hi = Math.max(...ys), span = hi - lo || 1;
-  const d = points.map((p, i) => `${i ? 'L' : 'M'}${(i / (points.length - 1) * 100).toFixed(2)} ${(36 - (p.median_temperature_c - lo) / span * 32).toFixed(2)}`).join('');
-  return `<svg viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="last hour"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke" style="color:var(--accent)"/></svg>`;
+  const d = points.map((p, i) => `${i ? 'L' : 'M'}${(i / (points.length - 1) * 100).toFixed(2)} ${(22 - (p.median_temperature_c - lo) / span * 20).toFixed(2)}`).join('');
+  return `<svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.3" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
 async function loadSites() {
   const sites = await get('/api/sites');
   if (!site && sites.length) site = sites[0].site;
   const minutes = await Promise.all(sites.map(s => get(`/api/sites/${s.site}/minutes?limit=60`)));
+  const devices = sites.reduce((n, s) => n + s.devices, 0);
+  $('summary').textContent = sites.length ? `${sites.length} sites · ${devices} devices in the last minute` : '';
   $('sites').innerHTML = sites.length ? sites.map((s, i) => `
-    <div class="card site ${s.site === site ? 'sel' : ''}" data-site="${esc(s.site)}">
-      <div class="meta">${esc(s.site)}</div>
-      <div class="big">${s.median_temperature_c.toFixed(1)} °C</div>
-      <div class="meta">${s.readings.toLocaleString()} readings from ${s.devices} devices · ${(s.median_pressure_pa / 1000).toFixed(1)} kPa</div>
-      <div class="meta">minute ending ${new Date(s.window_end).toLocaleTimeString()}</div>
+    <button type="button" class="site ${s.site === site ? 'sel' : ''}" data-site="${esc(s.site)}">
+      <div style="display:flex;justify-content:space-between" class="quiet"><span class="mono">${esc(s.site)}</span><span>${s.devices} devices</span></div>
+      <div class="big">${s.median_temperature_c.toFixed(1)}<span class="quiet" style="font-size:14px"> °C</span></div>
       ${spark(minutes[i])}
-    </div>`).join('') : '<p class="empty">No site data yet.</p>';
+      <div class="quiet" style="margin-top:4px">${s.readings.toLocaleString()} readings · ${(s.median_pressure_pa / 1000).toFixed(1)} kPa · to ${new Date(s.window_end).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+    </button>`).join('') : '<div class="empty">No site data yet.</div>';
   for (const el of document.querySelectorAll('.site')) el.onclick = () => { site = el.dataset.site; refresh(); };
 }
 
 async function loadDevices() {
   if (!site) return;
-  const devices = await get(`/api/sites/${site}/devices`);
-  $('devicesTitle').textContent = `Devices · ${site} · ${devices.length}`;
-  $('devices').innerHTML = devices.map(d => `
-    <tr><td class="mono"><a href="#" data-device="${esc(d.device)}">${esc(d.device)}</a></td>
-    <td><span class="dot ${freshness(d.last_seen)}"></span>${ago(d.last_seen)}</td><td class="mono">${d.last_seq}</td></tr>`).join('');
-  for (const a of document.querySelectorAll('[data-device]')) a.onclick = e => { e.preventDefault(); $('deviceId').value = a.dataset.device; loadReadings(); };
+  const list = await get(`/api/sites/${site}/devices`);
+  const quiet = list.filter(d => silent(d.last_seen));
+  quiet.sort((a, b) => new Date(a.last_seen) - new Date(b.last_seen));
+  const rows = quiet.concat(list.filter(d => !silent(d.last_seen)));
+  $('devicesTitle').innerHTML = `<span class="mono">${esc(site)}</span> devices`;
+  $('silent').innerHTML = quiet.length ? `<span class="bad-text">${quiet.length} not reporting</span>` : 'all reporting';
+  $('devices').innerHTML = rows.map(d => `
+    <tr class="pick ${d.device === device ? 'sel' : ''}" data-device="${esc(d.device)}">
+      <td class="mono"><span class="dot ${silent(d.last_seen) ? 'bad' : ''}"></span>${esc(d.device)}</td>
+      <td class="${silent(d.last_seen) ? 'bad-text' : 'quiet'}">${ago(d.last_seen)}</td>
+      <td class="mono quiet">${d.last_seq}</td>
+    </tr>`).join('');
+  for (const tr of document.querySelectorAll('tr.pick')) tr.onclick = () => { device = tr.dataset.device; $('deviceId').value = device; loadReadings(); loadDevices(); };
 }
 
 async function loadReadings() {
   const id = $('deviceId').value.trim();
   if (!id) return;
+  device = id;
   const rows = await get(`/api/devices/${encodeURIComponent(id)}/readings?limit=50`);
+  $('readingsTitle').innerHTML = `<span class="mono">${esc(id)}</span> readings`;
   $('readings').innerHTML = rows.length ? `
-    <p class="meta"><span class="dot ${freshness(rows[0].observed_at)}"></span>Last reading ${ago(rows[0].observed_at)} at ${esc(rows[0].site)}</p>
-    <table><thead><tr><th>Seq</th><th>Observed</th><th>°C</th><th>kPa</th><th>mm/s</th></tr></thead><tbody>
-    ${rows.map(r => `<tr><td class="mono">${r.seq}</td><td>${new Date(r.observed_at).toLocaleTimeString()}</td><td>${r.temperature_c.toFixed(2)}</td><td>${(r.pressure_pa / 1000).toFixed(2)}</td><td>${r.vibration_mm_s.toFixed(2)}</td></tr>`).join('')}
-    </tbody></table>` : `<p class="empty">No readings stored for ${esc(id)}.</p>`;
+    <div class="${silent(rows[0].observed_at) ? 'bad-text' : 'quiet'}" style="padding:0 14px 10px"><span class="dot ${silent(rows[0].observed_at) ? 'bad' : ''}"></span>Last reading ${ago(rows[0].observed_at)} from ${esc(rows[0].site)}</div>
+    <table><thead><tr><th>Seq</th><th>Observed</th><th class="r">°C</th><th class="r">kPa</th><th class="r">mm/s</th></tr></thead><tbody>
+    ${rows.map(r => `<tr class="mono"><td>${r.seq}</td><td class="quiet">${new Date(r.observed_at).toLocaleTimeString()}</td><td class="r">${r.temperature_c.toFixed(2)}</td><td class="r">${(r.pressure_pa / 1000).toFixed(2)}</td><td class="r">${r.vibration_mm_s.toFixed(2)}</td></tr>`).join('')}
+    </tbody></table>` : `<div class="empty">No readings stored for <span class="mono">${esc(id)}</span>.</div>`;
 }
 
 async function refresh() {
@@ -118,9 +155,9 @@ async function refresh() {
     $('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
   } catch (e) { $('updated').textContent = e.message; }
 }
-$('lookup').onsubmit = e => { e.preventDefault(); loadReadings(); };
+$('lookup').onsubmit = e => { e.preventDefault(); loadReadings().then(loadDevices); };
 refresh();
-setInterval(refresh, 10000);
+setInterval(() => { if (document.activeElement?.id !== 'deviceId') refresh(); }, 10000);
 </script>
 </body>
 </html>
