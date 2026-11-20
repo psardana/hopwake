@@ -1,0 +1,19 @@
+# Where Hopwake finds the device and sequence number of each reading in the
+# reference pipeline. Each hop derives the same journey ID from them.
+tenant: reference
+sources:
+  - name: raw readings from devices
+    kind: mqtt
+    match: plant/+/+/telemetry
+    device_from_topic: plant/+/{device}/telemetry
+    seq_field: seq
+  - name: readings as the bridge forwards them
+    kind: kafka
+    match: telemetry.raw
+    device_field: device_id
+    seq_field: seq
+  - name: normalised readings
+    kind: kafka
+    match: telemetry.normalized
+    device_field: device
+    seq_field: seq

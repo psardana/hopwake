@@ -34,12 +34,11 @@ type sighting struct {
 }
 
 type probe struct {
-	mu       sync.Mutex
-	warmEnd  time.Time // upstream sightings before this are ignored: their downstream copies may predate the probe
-	seen     map[string]*sighting
-	upRule   journey.Rule
-	downRule journey.Rule
-	skipped  map[string]int
+	mu      sync.Mutex
+	warmEnd time.Time // upstream sightings before this are ignored: their downstream copies may predate the probe
+	seen    map[string]*sighting
+	rules   *journey.Config
+	skipped map[string]int
 }
 
 func main() {
@@ -47,7 +46,7 @@ func main() {
 	filter := flag.String("filter", "plant/+/+/telemetry", "MQTT topic filter to watch")
 	brokers := flag.String("kafka", "localhost:9092", "Kafka bootstrap servers")
 	topic := flag.String("topic", "telemetry.normalized", "downstream Kafka topic")
-	tenant := flag.String("tenant", "reference", "tenant used in journey IDs")
+	rulesPath := flag.String("rules", "reference/journey-rules.yaml", "journey ID rules: where each source keeps the device and sequence number")
 	grace := flag.Duration("grace", 15*time.Second, "how long a journey may take before it counts as lost")
 	every := flag.Duration("every", 10*time.Second, "report interval")
 	warmup := flag.Duration("warmup", 5*time.Second, "ignore journeys that start this soon after the probe")
@@ -56,12 +55,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	rules, err := journey.LoadConfig(*rulesPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, ok := rules.Rule("kafka", *topic); !ok {
+		log.Fatalf("%s has no rule for Kafka topic %s", *rulesPath, *topic)
+	}
 	p := &probe{
-		seen:     map[string]*sighting{},
-		skipped:  map[string]int{},
-		warmEnd:  time.Now().Add(*warmup),
-		upRule:   journey.Rule{Tenant: *tenant, TopicPattern: "plant/+/{device}/telemetry", SeqField: "seq"},
-		downRule: journey.Rule{Tenant: *tenant, DeviceField: "device", SeqField: "seq"},
+		seen:    map[string]*sighting{},
+		skipped: map[string]int{},
+		warmEnd: time.Now().Add(*warmup),
+		rules:   rules,
 	}
 
 	kc, err := kgo.NewClient(
@@ -76,7 +81,7 @@ func main() {
 	go func() {
 		for ctx.Err() == nil {
 			fetches := kc.PollFetches(ctx)
-			fetches.EachRecord(func(r *kgo.Record) { p.observe(false, "", r.Value) })
+			fetches.EachRecord(func(r *kgo.Record) { p.observe(false, r.Topic, r.Value) })
 		}
 	}()
 
@@ -106,11 +111,16 @@ func main() {
 }
 
 func (p *probe) observe(upstream bool, topic string, payload []byte) {
-	rule, hop := p.downRule, "downstream"
+	kind, hop := "kafka", "downstream"
 	if upstream {
-		rule, hop = p.upRule, "upstream"
+		kind, hop = "mqtt", "upstream"
 	}
-	k, err := rule.Extract(topic, payload)
+	rule, ok := p.rules.Rule(kind, topic)
+	var k journey.Key
+	err := journey.ErrNoMatch
+	if ok {
+		k, err = rule.Extract(topic, payload)
+	}
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
