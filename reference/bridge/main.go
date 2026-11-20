@@ -18,6 +18,11 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/psardana/hopwake/reference/telemetry"
 )
 
 func main() {
@@ -42,6 +47,13 @@ func main() {
 	}
 	defer kc.Close()
 
+	shutdown, err := telemetry.Setup(ctx, "bridge")
+	if err != nil {
+		log.Fatalf("telemetry: %v", err)
+	}
+	defer shutdown(context.Background())
+	tracer := telemetry.Tracer("hopwake/reference/bridge")
+
 	flt := faultsFromEnv()
 	var in, out, failed, dropped atomic.Uint64
 	handler := func(_ mqtt.Client, m mqtt.Message) {
@@ -52,25 +64,46 @@ func main() {
 		if *deviceLevel < len(parts) {
 			key = parts[*deviceLevel]
 		}
+		// MQTT 3.1.1 carries no headers, so every reading starts a new trace here.
+		rctx, rspan := tracer.Start(context.Background(), "receive plant telemetry",
+			trace.WithSpanKind(trace.SpanKindConsumer),
+			trace.WithAttributes(
+				attribute.String("messaging.system", "mqtt"),
+				attribute.String("messaging.destination.name", m.Topic()),
+				attribute.String("device.id", key),
+			))
+		defer rspan.End()
 		payload := append([]byte(nil), m.Payload()...)
 		drop, copies, delay := flt.decide(key, payload)
 		if drop {
 			dropped.Add(1)
 			return
 		}
-		topic := m.Topic()
+		mqttTopic := m.Topic()
 		send := func() {
 			for i := 0; i < copies; i++ {
 				rec := &kgo.Record{
 					Key:   []byte(key),
 					Value: payload,
 					Headers: []kgo.RecordHeader{
-						{Key: "mqtt_topic", Value: []byte(topic)},
+						{Key: "mqtt_topic", Value: []byte(mqttTopic)},
 						{Key: "bridge_received_at", Value: []byte(received.Format(time.RFC3339Nano))},
 					},
 				}
+				pctx, pspan := tracer.Start(rctx, "send "+*topic,
+					trace.WithSpanKind(trace.SpanKindProducer),
+					trace.WithAttributes(
+						attribute.String("messaging.system", "kafka"),
+						attribute.String("messaging.destination.name", *topic),
+						attribute.String("messaging.kafka.message.key", key),
+						attribute.String("device.id", key),
+					))
+				telemetry.Inject(pctx, rec)
 				kc.Produce(ctx, rec, func(_ *kgo.Record, err error) {
+					defer pspan.End()
 					if err != nil {
+						pspan.RecordError(err)
+						pspan.SetStatus(codes.Error, "produce failed")
 						failed.Add(1)
 						return
 					}

@@ -115,6 +115,16 @@ In the portal both devices stop updating while the rest of their site carries on
 docker compose -f reference/compose.yaml logs bridge normaliser | grep '"fault"'
 ```
 
+## Tracing with OpenTelemetry
+
+Every service is instrumented with stock OpenTelemetry (Go and Python SDKs, the Java agent, Node auto-instrumentation). It is off by default; `tracing.env` turns it on and starts Jaeger:
+
+```bash
+docker compose -f reference/compose.yaml --env-file reference/tracing.env up -d --build
+```
+
+Jaeger: http://localhost:16686. `OTEL_SAMPLE` sets the sampling ratio. What these traces can and cannot answer is written up in [docs/baseline-opentelemetry.md](../docs/baseline-opentelemetry.md).
+
 ## Device simulator
 
 Each device publishes JSON to `plant/<site>/<device>/telemetry` with a per-device sequence number:

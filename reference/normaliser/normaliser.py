@@ -101,6 +101,9 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
+    import tracing
+    tracer = tracing.setup("normaliser")
+
     faults = Faults()
     counts = {"in": 0, "out": 0, "dlq": 0, "dropped": 0}
     last_report = time.monotonic()
@@ -112,20 +115,26 @@ def main() -> None:
                 continue
             counts["in"] += 1
             headers = list(msg.headers() or [])
-            try:
-                raw = faults.apply(json.loads(msg.value()))
-                if raw is None:
-                    counts["dropped"] += 1
-                    continue
-                out = normalise(raw)
-            except (ValueError, KeyError, TypeError, AttributeError) as exc:
-                producer.produce(DLQ, key=msg.key(), value=msg.value(),
-                                 headers=headers + [("dlq_reason", str(exc).encode()), ("dlq_at", now())])
-                counts["dlq"] += 1
-            else:
-                producer.produce(TARGET, key=msg.key(), value=json.dumps(out, separators=(",", ":")).encode(),
-                                 headers=headers + [("normalised_at", now())])
-                counts["out"] += 1
+            device = (msg.key() or b"").decode("utf-8", "replace")
+            with tracer.start_as_current_span(
+                f"process {SOURCE}", context=tracing.extract(headers), kind=tracing.CONSUMER,
+                attributes={"messaging.system": "kafka", "messaging.destination.name": SOURCE, "device.id": device},
+            ) as span:
+                try:
+                    raw = faults.apply(json.loads(msg.value()))
+                    if raw is None:
+                        counts["dropped"] += 1
+                        continue
+                    out = normalise(raw)
+                except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                    span.record_exception(exc)
+                    producer.produce(DLQ, key=msg.key(), value=msg.value(),
+                                     headers=tracing.inject(headers) + [("dlq_reason", str(exc).encode()), ("dlq_at", now())])
+                    counts["dlq"] += 1
+                else:
+                    producer.produce(TARGET, key=msg.key(), value=json.dumps(out, separators=(",", ":")).encode(),
+                                     headers=tracing.inject(headers) + [("normalised_at", now())])
+                    counts["out"] += 1
             producer.poll(0)
         if time.monotonic() - last_report >= 10:
             log.info("%(in)d consumed, %(out)d normalised, %(dlq)d to dead letters, %(dropped)d dropped by faults", counts)
@@ -133,6 +142,7 @@ def main() -> None:
 
     producer.flush(10)
     consumer.close()
+    tracing.shutdown()
     log.info("stopped: %(in)d consumed, %(out)d normalised, %(dlq)d to dead letters, %(dropped)d dropped by faults", counts)
 
 

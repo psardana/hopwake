@@ -62,6 +62,13 @@ services:
     environment:
       BRIDGE_MQTT: tcp://mosquitto:1883
       BRIDGE_KAFKA: kafka:29092
+      OTEL_SERVICE_NAME: bridge
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-1}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
       FAULT_DEVICES: ${BRIDGE_FAULT_DEVICES:-}
       FAULT_DROP: ${BRIDGE_FAULT_DROP:-0}
       FAULT_DUPLICATE: ${BRIDGE_FAULT_DUPLICATE:-0}
@@ -79,6 +86,13 @@ services:
     build: ./normaliser
     environment:
       NORMALISER_KAFKA: kafka:29092
+      OTEL_SERVICE_NAME: normaliser
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-1}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
       FAULT_DEVICES: ${NORMALISER_FAULT_DEVICES:-}
       FAULT_DROP: ${NORMALISER_FAULT_DROP:-0}
       FAULT_RENAME: ${NORMALISER_FAULT_RENAME:-0}
@@ -93,6 +107,13 @@ services:
     restart: on-failure
     environment:
       AGGREGATOR_KAFKA: kafka:29092
+      OTEL_SERVICE_NAME: aggregator
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-1}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
     depends_on:
       kafka-topics:
         condition: service_completed_successfully
@@ -124,6 +145,13 @@ services:
     environment:
       RECORDER_KAFKA: kafka:29092
       RECORDER_DB: postgres://hopwake:hopwake@postgres:5432/reference
+      OTEL_SERVICE_NAME: recorder
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-1}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
     depends_on:
       kafka-topics:
         condition: service_completed_successfully
@@ -136,6 +164,13 @@ services:
     build: ./api
     environment:
       API_DB: postgres://hopwake:hopwake@postgres:5432/reference
+      OTEL_SERVICE_NAME: api
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
+      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-1}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
     ports:
       - "8080:8080"
     depends_on:
@@ -152,3 +187,12 @@ services:
     depends_on:
       mosquitto:
         condition: service_healthy
+
+  # Trace store and UI for the OpenTelemetry baseline: http://localhost:16686
+  # Only with the tracing profile, see reference/tracing.env.
+  jaeger:
+    image: jaegertracing/jaeger:2.5.0
+    profiles: ["tracing"]
+    ports:
+      - "16686:16686"
+      - "4318:4318"

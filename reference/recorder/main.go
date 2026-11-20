@@ -18,6 +18,11 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/psardana/hopwake/reference/telemetry"
 )
 
 type reading struct {
@@ -71,6 +76,13 @@ func main() {
 
 	go prune(ctx, pool, *retention)
 
+	shutdown, err := telemetry.Setup(ctx, "recorder")
+	if err != nil {
+		log.Fatalf("telemetry: %v", err)
+	}
+	defer shutdown(context.Background())
+	tracer := telemetry.Tracer("hopwake/reference/recorder")
+
 	var stored, minutes, skipped int
 	report := time.Now()
 	for ctx.Err() == nil {
@@ -81,7 +93,17 @@ func main() {
 		fetches.EachError(func(t string, p int32, err error) { log.Printf("fetch %s/%d: %v", t, p, err) })
 
 		batch := &pgx.Batch{}
+		var spans []trace.Span
 		fetches.EachRecord(func(r *kgo.Record) {
+			// One span per record, continuing the trace the record carries.
+			_, span := tracer.Start(telemetry.Extract(context.Background(), r), "store "+r.Topic,
+				trace.WithSpanKind(trace.SpanKindConsumer),
+				trace.WithAttributes(
+					attribute.String("messaging.system", "kafka"),
+					attribute.String("messaging.destination.name", r.Topic),
+					attribute.String("device.id", string(r.Key)),
+				))
+			spans = append(spans, span)
 			switch r.Topic {
 			case *readingsTopic:
 				var v reading
@@ -110,9 +132,17 @@ func main() {
 		if batch.Len() > 0 {
 			if err := pool.SendBatch(ctx, batch).Close(); err != nil {
 				log.Printf("write batch: %v", err)
+				for _, s := range spans {
+					s.RecordError(err)
+					s.SetStatus(codes.Error, "write failed")
+					s.End()
+				}
 				time.Sleep(2 * time.Second)
 				continue // offsets stay uncommitted, so the batch is read again
 			}
+		}
+		for _, s := range spans {
+			s.End()
 		}
 		if err := kc.CommitUncommittedOffsets(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("commit offsets: %v", err)
