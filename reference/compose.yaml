@@ -39,6 +39,20 @@ services:
       timeout: 10s
       retries: 10
 
+  # Creates the topics before any service needs them, so a cold start does not
+  # depend on the order in which producers and consumers come up.
+  kafka-topics:
+    image: apache/kafka:4.0.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for t in telemetry.raw telemetry.normalized telemetry.site_minute telemetry.dlq; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic "$$t" --partitions 6 --replication-factor 1
+        done
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   bridge:
     build:
       context: ..
@@ -54,6 +68,8 @@ services:
       FAULT_DELAY: ${BRIDGE_FAULT_DELAY:-0s}
       FAULT_DELAY_RATE: ${BRIDGE_FAULT_DELAY_RATE:-0}
     depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
       mosquitto:
         condition: service_healthy
       kafka:
@@ -67,14 +83,19 @@ services:
       FAULT_DROP: ${NORMALISER_FAULT_DROP:-0}
       FAULT_RENAME: ${NORMALISER_FAULT_RENAME:-0}
     depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
 
   aggregator:
     build: ./aggregator
+    restart: on-failure
     environment:
       AGGREGATOR_KAFKA: kafka:29092
     depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
 
@@ -104,6 +125,8 @@ services:
       RECORDER_KAFKA: kafka:29092
       RECORDER_DB: postgres://hopwake:hopwake@postgres:5432/reference
     depends_on:
+      kafka-topics:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
       postgres:
