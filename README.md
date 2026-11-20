@@ -30,7 +30,25 @@ See [docs/architecture.md](docs/architecture.md) and [docs/hop-event.md](docs/ho
 | Path | What |
 | --- | --- |
 | `docs/` | Architecture and data model |
+| `internal/journey/` | Journey IDs: derived from tenant, device and sequence number, or taken from `traceparent` |
+| `cmd/journeyprobe/` | Prototype: watches MQTT and a Kafka topic and reports journeys lost between them |
 | `reference/` | A self-contained IoT pipeline with a simulated fleet, used to develop and test Hopwake |
+
+## Try the prototype
+
+Start the reference pipeline with one device losing data at the bridge, then run the probe:
+
+```bash
+BRIDGE_FAULT_DEVICES=dev-00042 BRIDGE_FAULT_DROP=1 docker compose -f reference/compose.yaml up -d --build
+go run ./cmd/journeyprobe
+```
+
+```
+3600 journeys: 3588 reached downstream (99.67%), 12 lost, 0 repeats; latency p50 15ms p95 24ms
+  lost dev-00042: 12 readings, seq 1896 to 1907
+```
+
+The probe never sees a header: each side derives the journey ID from the device and its sequence number.
 
 ## Licence
 
