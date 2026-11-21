@@ -41,6 +41,32 @@ Example:
 }
 ```
 
+## On the wire: OTLP spans
+
+Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them. Implemented in `internal/hop`.
+
+| Span field | Value |
+| --- | --- |
+| Trace ID | The journey ID, so every hop of one reading lands in one trace |
+| Span ID | Random |
+| Parent | None: hops are siblings, not a call tree |
+| Name | `hop <hop>`, e.g. `hop kafka:telemetry.raw` |
+| Start and end | The moment the hop saw the reading |
+| Kind | Consumer |
+
+| Attribute | Field |
+| --- | --- |
+| `hopwake.schema` | `hop/v0` |
+| `hopwake.tenant` | `tenant` |
+| `hopwake.device.id` | `device_id` |
+| `hopwake.seq` | the device's sequence number |
+| `hopwake.journey.id` | `journey_id`, repeated for stores that do not index trace IDs |
+| `hopwake.hop` | `component` |
+| `hopwake.op` | `op` |
+| `hopwake.correlation` | `correlation` |
+| `hopwake.payload.bytes` | `bytes` |
+| `messaging.system`, `messaging.destination.name` | where the reading was seen, per the OpenTelemetry messaging conventions |
+
 ## Journey ID
 
 Resolved in this order:
