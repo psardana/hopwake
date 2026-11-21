@@ -24,10 +24,20 @@ import (
 //	    match: telemetry.normalized
 //	    device_field: device
 //	    seq_field: seq
+//	route:
+//	  - mqtt:plant/+/+/telemetry
+//	  - kafka:telemetry.normalized
+//
+// Route lists the hops a reading should pass, in order, by HopName.
 type Config struct {
 	Tenant  string   `yaml:"tenant"`
 	Sources []Source `yaml:"sources"`
+	Route   []string `yaml:"route"`
 }
+
+// HopName is how hop events name the place a source is read: kind, a colon,
+// then the match, e.g. "kafka:telemetry.raw".
+func (s Source) HopName() string { return s.Kind + ":" + s.Match }
 
 // Source is one kind of message a tap reads.
 type Source struct {
@@ -94,21 +104,44 @@ func (c *Config) check() error {
 			return fmt.Errorf("%s: seq_field is required", where)
 		}
 	}
+	known := map[string]bool{}
+	for _, s := range c.Sources {
+		known[s.HopName()] = true
+	}
+	seen := map[string]bool{}
+	for _, h := range c.Route {
+		if !known[h] {
+			return fmt.Errorf("route: %q is not a source (use kind:match)", h)
+		}
+		if seen[h] {
+			return fmt.Errorf("route: %q appears twice", h)
+		}
+		seen[h] = true
+	}
 	return nil
 }
 
-// Rule returns the extraction rule for a message on a topic, if a source
-// of that kind matches it. The first matching source wins.
-func (c *Config) Rule(kind, topic string) (Rule, bool) {
+// Source returns the source a message on a topic belongs to, if any.
+func (c *Config) Source(kind, topic string) (Source, bool) {
 	for _, s := range c.Sources {
 		if s.Kind != kind {
 			continue
 		}
 		if (kind == "mqtt" && topicMatches(s.Match, topic)) || (kind == "kafka" && s.Match == topic) {
-			return Rule{Tenant: c.Tenant, TopicPattern: s.DeviceFromTopic, DeviceField: s.DeviceField, SeqField: s.SeqField}, true
+			return s, true
 		}
 	}
-	return Rule{}, false
+	return Source{}, false
+}
+
+// Rule returns the extraction rule for a message on a topic, if a source
+// of that kind matches it. The first matching source wins.
+func (c *Config) Rule(kind, topic string) (Rule, bool) {
+	s, ok := c.Source(kind, topic)
+	if !ok {
+		return Rule{}, false
+	}
+	return Rule{Tenant: c.Tenant, TopicPattern: s.DeviceFromTopic, DeviceField: s.DeviceField, SeqField: s.SeqField}, true
 }
 
 // topicMatches applies MQTT filter rules: + matches one level, # the rest.

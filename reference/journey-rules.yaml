@@ -17,3 +17,9 @@ sources:
     match: telemetry.normalized
     device_field: device
     seq_field: seq
+# The hops a reading should pass, in order. The journey service compares what
+# it sees with this to say where a device's data stopped.
+route:
+  - mqtt:plant/+/+/telemetry
+  - kafka:telemetry.raw
+  - kafka:telemetry.normalized

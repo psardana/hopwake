@@ -56,6 +56,9 @@ func TestReferenceRulesFileLoads(t *testing.T) {
 			t.Errorf("no rule for %s", topic)
 		}
 	}
+	if len(c.Route) != 3 || c.Route[0] != "mqtt:plant/+/+/telemetry" {
+		t.Errorf("route = %v", c.Route)
+	}
 }
 
 func TestNoRuleForOtherTopics(t *testing.T) {
@@ -102,6 +105,8 @@ func TestConfigRejects(t *testing.T) {
 		"no device in path": "tenant: x\nsources:\n  - {kind: mqtt, match: a/+, device_from_topic: a/+, seq_field: s}\n",
 		"no seq":            "tenant: x\nsources:\n  - {kind: kafka, match: t, device_field: d}\n",
 		"unknown key":       "tenant: x\nsources:\n  - {kind: kafka, match: t, device_field: d, seq_field: s, colour: red}\n",
+		"route unknown hop": "tenant: x\nsources:\n  - {kind: kafka, match: t, device_field: d, seq_field: s}\nroute: [kafka:other]\n",
+		"route twice":       "tenant: x\nsources:\n  - {kind: kafka, match: t, device_field: d, seq_field: s}\nroute: [kafka:t, kafka:t]\n",
 	}
 	for name, yml := range cases {
 		if _, err := ParseConfig([]byte(yml)); err == nil || !strings.Contains(err.Error(), "journey rules") {
