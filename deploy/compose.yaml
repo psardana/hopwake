@@ -1,0 +1,73 @@
+# Hopwake itself: taps, collector, store and journey service.
+# It joins the reference pipeline's network from the outside, as it would sit
+# next to a customer's pipeline. Start the reference pipeline first:
+#   docker compose -f reference/compose.yaml up -d --build
+#   docker compose -f deploy/compose.yaml up -d --build
+name: hopwake
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: hopwake
+      CLICKHOUSE_USER: hopwake
+      CLICKHOUSE_PASSWORD: hopwake
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user hopwake --password hopwake -q 'SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.164.0
+    command: ["--config=/etc/hopwake/collector.yaml"]
+    volumes:
+      - ./collector.yaml:/etc/hopwake/collector.yaml:ro
+    ports:
+      - "4320:4318"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  tap:
+    build:
+      context: ..
+      dockerfile: deploy/go.Dockerfile
+      args:
+        CMD: tap
+    environment:
+      TAP_RULES: /etc/hopwake/journey-rules.yaml
+      TAP_MQTT: tcp://mosquitto:1883
+      TAP_KAFKA: kafka:29092
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
+    volumes:
+      - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
+    depends_on:
+      - collector
+
+  journey:
+    build:
+      context: ..
+      dockerfile: deploy/go.Dockerfile
+      args:
+        CMD: journey
+    environment:
+      JOURNEY_RULES: /etc/hopwake/journey-rules.yaml
+      JOURNEY_CLICKHOUSE: clickhouse:9000
+    volumes:
+      - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
+    ports:
+      - "8090:8090"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+networks:
+  default:
+    name: hopwake-reference_default
+    external: true

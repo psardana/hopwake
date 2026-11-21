@@ -12,8 +12,8 @@ Early work. Nothing here is usable yet.
 
 | Phase | Goal | State |
 | --- | --- | --- |
-| 0. Validate | Reference pipeline with a simulated fleet, baseline with plain OpenTelemetry | In progress |
-| 1. Core journey | MQTT and Kafka taps, journey IDs, storage, a device journey view | Not started |
+| 0. Validate | Reference pipeline with a simulated fleet, baseline with plain OpenTelemetry | Done |
+| 1. Core journey | MQTT and Kafka taps, journey IDs, storage, a device journey view | In progress: taps, store and verdicts work; the view is next |
 | 2. Transforms and aggregates | Schema diffs per hop, watch mode, aggregation drill-down | Not started |
 
 ## How it works
@@ -30,25 +30,42 @@ See [docs/architecture.md](docs/architecture.md) and [docs/hop-event.md](docs/ho
 | Path | What |
 | --- | --- |
 | `docs/` | Architecture and data model |
-| `internal/journey/` | Journey IDs: derived from tenant, device and sequence number, or taken from `traceparent` |
-| `cmd/journeyprobe/` | Prototype: watches MQTT and a Kafka topic and reports journeys lost between them |
+| `internal/journey/` | Journey IDs and the per-source rules file: where each source keeps the device and sequence number, and the expected route |
+| `internal/hop/` | Hop events as OTLP spans whose trace ID is the journey ID |
+| `internal/verdict/` | Decides, from the hops a device's readings reached, whether its data gets through and where it stops |
+| `cmd/tap/` | Passive MQTT and Kafka tap: one hop event per reading seen |
+| `cmd/journey/` | Journey service: device journeys and verdicts from the store |
+| `cmd/journeyprobe/` | The Phase 0 prototype: compares two hops in memory |
+| `deploy/` | Hopwake's own stack: tap, OpenTelemetry Collector, ClickHouse, journey service |
 | `reference/` | A self-contained IoT pipeline with a simulated fleet, used to develop and test Hopwake |
 
-## Try the prototype
+## Try it
 
-Start the reference pipeline with one device losing data at the bridge, then run the probe:
+Start the reference pipeline, then Hopwake next to it:
 
 ```bash
-BRIDGE_FAULT_DEVICES=dev-00042 BRIDGE_FAULT_DROP=1 docker compose -f reference/compose.yaml up -d --build
-go run ./cmd/journeyprobe
+DEVICES=50 docker compose -f reference/compose.yaml up -d --build
+docker compose -f deploy/compose.yaml up -d --build
+```
+
+Break one device at the bridge, then ask where its data stops:
+
+```bash
+DEVICES=50 BRIDGE_FAULT_DEVICES=dev-00042 BRIDGE_FAULT_DROP=1 \
+  docker compose -f reference/compose.yaml up -d --no-deps bridge
+curl -s localhost:8090/api/devices/dev-00042
 ```
 
 ```
-3600 journeys: 3588 reached downstream (99.67%), 12 lost, 0 repeats; latency p50 15ms p95 24ms
-  lost dev-00042: 12 readings, seq 1896 to 1907
+dev-00042: readings stop after mqtt:plant/+/+/telemetry. 17 readings since 10:03:48 UTC did not reach kafka:telemetry.raw.
 ```
 
-The probe never sees a header: each side derives the journey ID from the device and its sequence number.
+No header was needed and nothing in the pipeline changed: the tap derives each reading's journey ID at every hop from the device and its sequence number.
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET :8090/api/devices/{device}?window=15m` | Verdict, hop counts and the latest journeys of one device |
+| `GET :8090/api/journeys/{journey_id}` | Every hop of one reading |
 
 ## Licence
 
