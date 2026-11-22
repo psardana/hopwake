@@ -183,7 +183,7 @@ services:
       dockerfile: reference/go.Dockerfile
       args:
         CMD: devicesim
-    command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-1000}", "-interval", "${INTERVAL:-5s}"]
+    command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-50}", "-interval", "${INTERVAL:-5s}"]
     depends_on:
       mosquitto:
         condition: service_healthy

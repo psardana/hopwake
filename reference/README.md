@@ -23,7 +23,7 @@ The portal is at http://localhost:8080.
 docker compose -f reference/compose.yaml up -d --build
 ```
 
-The fleet size and reading interval come from `DEVICES` (default 1000) and `INTERVAL` (default 5s):
+The fleet size and reading interval come from `DEVICES` (default 50) and `INTERVAL` (default 5s). `fleet.txt` lists the 50 default devices, so Hopwake knows which ones should report; regenerate it if you change the default:
 
 ```bash
 DEVICES=300 INTERVAL=1s docker compose -f reference/compose.yaml up -d --build
@@ -136,7 +136,7 @@ Each device publishes JSON to `plant/<site>/<device>/telemetry` with a per-devic
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `-broker` | `tcp://localhost:1883` | MQTT broker |
-| `-devices` | 1000 | Devices to simulate |
+| `-devices` | 1000 | Devices to simulate (Compose passes `DEVICES`, default 50) |
 | `-sites` | 4 | Sites the devices are spread over |
 | `-interval` | 5s | Time between readings per device |
 | `-conns` | 10 | MQTT connections shared by the devices |
