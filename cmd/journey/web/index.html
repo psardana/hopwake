@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hopwake</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#fbfbfc; --side:#f4f4f6; --panel:#ffffff; --line:#e7e7eb; --line2:#efeff2; --ink:#17171c; --quiet:#62626e;
+    --accent:#5e6ad2; --accent-bg:#eef0fd; --warn:#c2410c; --warn-dot:#ea7a35; --warn-bg:#fdf1e9; --dot:#17171c; --off:#d7d7de;
+    --mono:'JetBrains Mono', ui-monospace, Menlo, monospace;
+  }
+  :root[data-theme=dark] {
+    --bg:#0f0f12; --side:#0b0b0e; --panel:#141418; --line:#25252c; --line2:#1d1d23; --ink:#ececf1; --quiet:#9b9ba8;
+    --accent:#8c94ff; --accent-bg:#1c1e33; --warn:#f39a5c; --warn-dot:#f39a5c; --warn-bg:#2a1b12; --dot:#ececf1; --off:#34343d;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.5 Inter, system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  button, input, select { font: inherit; color: inherit; }
+  a { color: inherit; text-decoration: none; }
+  .app { display: flex; flex-wrap: wrap; min-height: 100%; }
+  nav.side { flex: 1 1 220px; max-width: 240px; background: var(--side); border-right: 1px solid var(--line); padding: 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+  .brand { display: flex; align-items: center; gap: 8px; padding: 4px 10px 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .brand span.t { margin-left: auto; color: var(--quiet); font-size: 12px; font-weight: 400; }
+  .navlink { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: 6px; color: var(--quiet); font-weight: 500; cursor: pointer; }
+  .navlink:hover { background: var(--line2); color: var(--ink); }
+  .navlink.on { background: var(--panel); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+  .navlink .n { margin-left: auto; font-size: 11px; }
+  .sidehead { margin-top: 20px; padding: 0 10px 6px; font-size: 11px; color: var(--quiet); font-weight: 500; display: flex; justify-content: space-between; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--off); flex: none; display: inline-block; }
+  .dot.bad { background: var(--warn-dot); }
+  main { flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; }
+  .top { height: 52px; display: flex; align-items: center; gap: 10px; padding: 0 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .search { flex: 1 1 260px; max-width: 460px; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--quiet); }
+  .search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); }
+  kbd { font-family: inherit; font-size: 11px; color: var(--quiet); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; }
+  .btn { height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); cursor: pointer; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { border-color: var(--quiet); }
+  select.btn { padding-right: 8px; }
+  .content { padding: 28px 32px 48px; display: flex; flex-direction: column; gap: 28px; max-width: 1180px; width: 100%; }
+  .quiet { color: var(--quiet); }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 500; background: var(--line2); color: var(--quiet); }
+  .chip.bad { background: var(--warn-bg); color: var(--warn); }
+  .chip .dot { width: 6px; height: 6px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
+  .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  .route { display: flex; overflow-x: auto; padding-bottom: 4px; }
+  .hop { flex: 1 1 150px; min-width: 150px; padding: 10px 12px 12px; border-radius: 8px; border: 1px solid transparent; text-align: left; background: transparent; cursor: pointer; }
+  .hop:hover { background: var(--line2); }
+  .hop.sel { border-color: var(--line); background: var(--panel); }
+  .hop .line { display: flex; align-items: center; gap: 6px; }
+  .hop .bar { flex: 1; height: 1px; background: var(--off); }
+  .hop .k { margin-top: 10px; font-weight: 500; white-space: nowrap; }
+  .hop .m { color: var(--quiet); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ring { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .grid { overflow-x: auto; }
+  .grow { display: grid; align-items: center; height: 30px; border-top: 1px solid var(--line2); }
+  .grow.head { height: 28px; color: var(--quiet); font-size: 11px; border-top-color: var(--line); }
+  .grow.pick { cursor: pointer; }
+  .grow.pick:hover { background: var(--line2); }
+  .cell { width: 9px; height: 9px; border-radius: 50%; margin: auto; }
+  .split { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
+  dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
+  dt { color: var(--quiet); }
+  dd { margin: 0; text-align: right; font-family: var(--mono); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 0 14px; height: 34px; border-top: 1px solid var(--line2); white-space: nowrap; }
+  th { color: var(--quiet); font-weight: 500; font-size: 11px; height: 28px; border-top-color: var(--line); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover td { background: var(--line2); }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; }
+  .empty { padding: 16px; color: var(--quiet); }
+  .err { padding: 10px 12px; border-radius: 6px; background: var(--warn-bg); color: var(--warn); }
+  @media (max-width: 720px) { nav.side { max-width: none; flex-basis: 100%; border-right: 0; border-bottom: 1px solid var(--line); } .content { padding: 20px 16px 40px; } .top { padding: 0 16px; height: auto; min-height: 52px; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="side" aria-label="Main">
+    <div class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 15c3 0 3-6 6-6s3 6 6 6 3-6 6-6"/></svg>
+      Hopwake <span class="t" id="tenant"></span>
+    </div>
+    <a class="navlink" id="navFleet" href="#/">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      Fleet <span class="n" id="fleetCount"></span></a>
+    <div class="sidehead"><span>Needs attention</span><span id="attnCount"></span></div>
+    <div id="attention"></div>
+    <div class="sidehead"><span>Recent</span></div>
+    <div id="recent"></div>
+  </nav>
+  <main>
+    <div class="top">
+      <label class="search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        <input id="q" aria-label="Find a device" placeholder="Find a device, e.g. dev-00042" autocomplete="off" list="deviceList">
+        <kbd>⌘K</kbd>
+      </label>
+      <datalist id="deviceList"></datalist>
+      <span style="flex:1"></span>
+      <select class="btn" id="window" aria-label="Time window">
+        <option value="15m">Last 15 minutes</option><option value="1h">Last hour</option><option value="6h">Last 6 hours</option><option value="24h">Last 24 hours</option>
+      </select>
+      <button class="btn" id="themeBtn" type="button" aria-label="Switch light and dark"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+    </div>
+    <div class="content" id="view"><div class="empty">Loading…</div></div>
+  </main>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const get = async p => { const r = await fetch(p); if (!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.json(); };
+const time = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const ago = iso => { const s = Math.max(0, Math.round((Date.now() - new Date(iso)) / 1000)); return s < 60 ? `${s} s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+const ms = ns => ns >= 1e9 ? `${(ns / 1e9).toFixed(1)} s` : `${Math.round(ns / 1e6)} ms`;
+const hopKind = h => h.split(':')[0];
+const hopWhere = h => h.slice(h.indexOf(':') + 1);
+const hopShort = h => { const w = hopWhere(h); return hopKind(h) === 'mqtt' ? 'MQTT' : w.split('.').pop(); };
+let fleet = null, current = null, selHop = null, timer = null;
+
+// Theme: follows the system; a manual choice is remembered in this browser.
+function applyTheme(t) { document.documentElement.dataset.theme = t; }
+let saved = null; try { saved = localStorage.getItem('hopwake-theme'); } catch {}
+const mq = matchMedia('(prefers-color-scheme: dark)');
+applyTheme(saved || (mq.matches ? 'dark' : 'light'));
+mq.addEventListener('change', e => { if (!saved) applyTheme(e.matches ? 'dark' : 'light'); });
+$('themeBtn').onclick = () => { saved = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; applyTheme(saved); try { localStorage.setItem('hopwake-theme', saved); } catch {} };
+
+function recentList() { try { return JSON.parse(localStorage.getItem('hopwake-recent') || '[]'); } catch { return []; } }
+function remember(d) { const r = [d, ...recentList().filter(x => x !== d)].slice(0, 6); try { localStorage.setItem('hopwake-recent', JSON.stringify(r)); } catch {} }
+const win = () => $('window').value;
+
+function stateChip(state, after) {
+  if (state === 'stopped') return `<span class="chip bad"><span class="dot bad"></span>${after ? `Stops after ${esc(hopShort(after))}` : 'Stopped'}</span>`;
+  if (state === 'silent') return '<span class="chip bad"><span class="dot bad"></span>Silent</span>';
+  if (state === 'unknown') return '<span class="chip">Never seen</span>';
+  return '<span class="chip"><span class="dot"></span>Healthy</span>';
+}
+
+async function loadFleet() {
+  fleet = await get(`/api/fleet?window=${win()}`);
+  $('tenant').textContent = fleet.tenant;
+  const bad = fleet.devices.filter(d => d.state === 'stopped' || d.state === 'silent');
+  $('fleetCount').textContent = fleet.devices.length;
+  $('attnCount').textContent = bad.length || '';
+  $('attention').innerHTML = bad.length ? bad.slice(0, 12).map(d => `<a class="navlink mono" style="font-size:12px" href="#/device/${encodeURIComponent(d.device)}"><span class="dot bad"></span>${esc(d.device)}</a>`).join('') : '<div class="navlink" style="cursor:default">All devices healthy</div>';
+  $('recent').innerHTML = recentList().map(d => `<a class="navlink mono" style="font-size:12px" href="#/device/${encodeURIComponent(d)}"><span class="dot ${bad.some(b => b.device === d) ? 'bad' : ''}"></span>${esc(d)}</a>`).join('');
+  $('deviceList').innerHTML = fleet.devices.map(d => `<option value="${esc(d.device)}">`).join('');
+}
+
+function renderFleet() {
+  $('navFleet').classList.add('on');
+  const devs = fleet.devices, route = fleet.route;
+  const n = s => devs.filter(d => d.state === s).length;
+  $('view').innerHTML = `
+    <div><h1>Fleet</h1><p class="quiet" style="margin:6px 0 0">${devs.length} devices seen in the ${esc(win())} window, judged against the route ${route.map(h => `<span class="mono">${esc(hopShort(h))}</span>`).join(' → ')}.</p></div>
+    <div class="stats">${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
+    <section class="panel" style="overflow-x:auto" aria-label="Devices">
+      ${devs.length ? `<table><thead><tr><th>Device</th><th>State</th>${route.map(h => `<th>Last seen at ${esc(hopShort(h))}</th>`).join('')}</tr></thead><tbody>
+      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after)}</td>${route.map(h => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : '—'}</td>`).join('')}</tr>`).join('')}
+      </tbody></table>` : '<div class="empty">No hop events in this window yet. Is the tap running?</div>'}
+    </section>`;
+  for (const tr of document.querySelectorAll('tbody tr')) tr.onclick = () => location.hash = `#/device/${encodeURIComponent(tr.dataset.d)}`;
+}
+
+async function renderDevice(device) {
+  $('navFleet').classList.remove('on');
+  const d = await get(`/api/devices/${encodeURIComponent(device)}?window=${win()}`);
+  if (current !== device) { selHop = null; current = device; remember(device); }
+  const v = d.verdict, route = d.route, last = route.length - 1;
+  const settled = d.journeys.find(j => Date.now() - new Date(j.first) >= 15000);
+  const reached = settled ? settled.reached : -1;
+  const stopIdx = v.state === 'stopped' && v.stopped_after ? route.indexOf(v.stopped_after) : -1;
+  if (selHop === null) selHop = stopIdx >= 0 ? stopIdx : last;
+  const stat = Object.fromEntries((d.hops || []).map(h => [h.hop, h]));
+  const bad = v.state === 'stopped' || v.state === 'silent';
+  // The server's sentence uses the server's clock; say it again in local time.
+  const sentence = v.state === 'stopped' && v.not_reached
+    ? `Readings stop after ${hopShort(v.stopped_after)}. ${v.missing} readings since ${time(v.since)} did not reach ${hopShort(v.not_reached)}.`
+    : v.state === 'silent' && v.since ? `No readings at any hop since ${time(v.since)}.`
+    : v.state === 'ok' && v.median_ns ? `Readings reach every hop, ${ms(v.median_ns)} from first to last.`
+    : v.sentence;
+
+  const hopsHtml = route.map((h, i) => {
+    const isStop = i === stopIdx, done = reached >= i;
+    const fill = isStop ? 'var(--warn-dot)' : done ? 'var(--dot)' : 'transparent';
+    const ring = isStop ? 'var(--warn-dot)' : done ? 'var(--dot)' : 'var(--off)';
+    const meta = isStop ? 'last hop reached' : stat[h] ? `${stat[h].count} · ${ago(stat[h].last_seen)}` : 'not seen';
+    return `<button type="button" class="hop ${i === selHop ? 'sel' : ''}" data-i="${i}">
+      <span class="line"><span class="ring" style="background:${fill};box-shadow:inset 0 0 0 1.5px ${ring}${isStop ? ',0 0 0 3px var(--warn-bg)' : ''}"></span>${i < last ? `<span class="bar" style="background:${reached > i && !(isStop) ? 'var(--dot)' : 'var(--off)'}"></span>` : ''}</span>
+      <div class="k" style="color:${i > reached && !isStop && reached >= 0 ? 'var(--quiet)' : 'var(--ink)'}">${esc(hopShort(h))}</div>
+      <div class="m mono" title="${esc(h)}">${esc(hopKind(h))} · ${esc(meta)}</div></button>`;
+  }).join('');
+
+  const cols = `64px 84px repeat(${route.length}, minmax(48px, 1fr))`;
+  const rows = d.journeys.slice(0, 14).map(j => {
+    const at = new Set(j.hops.map(h => h.hop));
+    const young = Date.now() - new Date(j.first) < 15000;
+    return `<div class="grow pick" style="grid-template-columns:${cols}" data-j="${esc(j.journey_id)}" title="journey ${esc(j.journey_id)}">
+      <span class="mono" style="padding-left:14px">${j.seq}</span><span class="mono quiet">${time(j.first)}</span>
+      ${route.map((h, i) => {
+        const hit = at.has(h);
+        const missing = !hit && !young && i === j.reached + 1;
+        return `<span class="cell" style="background:${hit ? 'var(--dot)' : 'transparent'};box-shadow:inset 0 0 0 1.5px ${hit ? 'var(--dot)' : missing ? 'var(--warn-dot)' : 'var(--off)'}"></span>`;
+      }).join('')}</div>`;
+  }).join('');
+
+  const h = route[selHop], s = stat[h];
+  const total = d.journeys.filter(j => Date.now() - new Date(j.first) >= 15000).length;
+  const reachedHere = d.journeys.filter(j => Date.now() - new Date(j.first) >= 15000 && j.hops.some(x => x.hop === h)).length;
+
+  $('view').innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
+      <div style="flex:1 1 400px">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after)}</div>
+        <p style="margin:6px 0 0;color:${bad ? 'var(--ink)' : 'var(--quiet)'}">${esc(sentence)}</p>
+      </div>
+      <button class="btn" type="button" id="copyLink">Copy link</button>
+    </div>
+    <section aria-label="Route">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--quiet);font-size:12px;font-weight:500;margin-bottom:8px">
+        <span>Route · ${route.length} hops</span>
+        <span>${v.last_complete ? `Last complete journey ${time(v.last_complete)}` : 'No complete journey in this window'}${v.median_ns ? ` · ${ms(v.median_ns)} first to last hop` : ''}</span>
+      </div>
+      <div class="route">${hopsHtml}</div>
+    </section>
+    <div class="split">
+      <section class="panel grid" style="flex:999 1 520px;min-width:0" aria-label="Recent readings">
+        <div style="display:flex;justify-content:space-between;padding:12px 14px;font-weight:500"><span>Recent readings</span><span class="quiet" style="font-weight:400">each row is one reading</span></div>
+        <div class="grow head" style="grid-template-columns:${cols}"><span style="padding-left:14px">Seq</span><span>Sent</span>${route.map(h => `<span style="text-align:center">${esc(hopShort(h))}</span>`).join('')}</div>
+        ${rows || '<div class="empty">No readings in this window.</div>'}
+      </section>
+      <aside class="panel" style="flex:1 1 280px;padding:16px;display:flex;flex-direction:column;gap:14px" aria-label="Hop detail">
+        <div><div class="quiet" style="font-size:11px;font-weight:500">Selected hop</div>
+          <div style="font-weight:600;font-size:15px;margin-top:2px">${esc(hopShort(h))}</div>
+          <div class="mono quiet" style="word-break:break-all">${esc(h)}</div></div>
+        <dl>
+          <dt>Readings seen</dt><dd>${s ? s.count : 0}</dd>
+          <dt>Last seen</dt><dd>${s ? time(s.last_seen) : '—'}</dd>
+          <dt>Readings that got here</dt><dd style="color:${total && reachedHere < total ? 'var(--warn)' : 'inherit'}">${total ? `${reachedHere} of ${total}` : '—'}</dd>
+          ${selHop === stopIdx && v.missing ? `<dt>Missing after it</dt><dd style="color:var(--warn)">${v.missing} since ${time(v.since)}</dd>` : ''}
+        </dl>
+        ${selHop === stopIdx && v.not_reached ? `<div class="quiet" style="border-top:1px solid var(--line2);padding-top:12px">Readings reach <span class="mono">${esc(hopShort(h))}</span> and never arrive at <span class="mono">${esc(hopShort(v.not_reached))}</span>. Whatever sits between those two hops is where to look.</div>` : ''}
+      </aside>
+    </div>`;
+  for (const b of document.querySelectorAll('.hop')) b.onclick = () => { selHop = Number(b.dataset.i); renderDevice(device); };
+  $('copyLink').onclick = async () => { try { await navigator.clipboard.writeText(location.href); $('copyLink').textContent = 'Copied'; } catch {} };
+}
+
+async function route() {
+  clearTimeout(timer);
+  const m = location.hash.match(/^#\/device\/(.+)$/);
+  try {
+    await loadFleet();
+    if (m) await renderDevice(decodeURIComponent(m[1])); else { current = null; renderFleet(); }
+  } catch (e) { $('view').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  timer = setTimeout(route, 5000);
+}
+
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter' && $('q').value.trim()) { location.hash = `#/device/${encodeURIComponent($('q').value.trim())}`; $('q').value = ''; $('q').blur(); } });
+document.addEventListener('keydown', e => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); $('q').focus(); } });
+$('window').onchange = route;
+addEventListener('hashchange', route);
+route();
+</script>
+</body>
+</html>

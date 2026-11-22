@@ -5,14 +5,17 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
 	"errors"
 	"flag"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -54,6 +57,9 @@ var schema = []string{
 	FROM otel_traces
 	WHERE SpanAttributes['hopwake.schema'] = 'hop/v0'`,
 }
+
+//go:embed web
+var webFiles embed.FS
 
 var validID = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
@@ -97,6 +103,14 @@ func main() {
 
 	s := &server{db: db, rules: rules, grace: *grace}
 	mux := http.NewServeMux()
+	web, _ := fs.Sub(webFiles, "web")
+	static := http.FileServerFS(web)
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		// Embedded files carry no modification time: make browsers ask again.
+		w.Header().Set("Cache-Control", "no-cache")
+		static.ServeHTTP(w, r)
+	})
+	mux.HandleFunc("GET /api/fleet", s.fleet)
 	mux.HandleFunc("GET /api/devices/{device}", s.device)
 	mux.HandleFunc("GET /api/journeys/{id}", s.journey)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +256,62 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		"hops":     stats,
 		"journeys": js,
 	})
+}
+
+type fleetDevice struct {
+	Device       string               `json:"device"`
+	State        verdict.State        `json:"state"`
+	StoppedAfter string               `json:"stopped_after,omitempty"`
+	LastSeen     map[string]time.Time `json:"last_seen"`
+}
+
+// fleet judges every device seen in the window from the last time each hop
+// saw it. Problems come first.
+func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
+	window := 15 * time.Minute
+	if q := r.URL.Query().Get("window"); q != "" {
+		d, err := time.ParseDuration(q)
+		if err != nil || d <= 0 || d > 72*time.Hour {
+			http.Error(w, "bad window", http.StatusBadRequest)
+			return
+		}
+		window = d
+	}
+	now := time.Now()
+	rows, err := s.db.Query(r.Context(), `
+		SELECT device, hop, max(ts) FROM hop_events
+		WHERE tenant = ? AND ts >= ?
+		GROUP BY device, hop`, s.rules.Tenant, now.Add(-window))
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	last := map[string]map[string]time.Time{}
+	for rows.Next() {
+		var device, hopName string
+		var at time.Time
+		if err := rows.Scan(&device, &hopName, &at); err != nil {
+			httpError(w, err)
+			return
+		}
+		if last[device] == nil {
+			last[device] = map[string]time.Time{}
+		}
+		last[device][hopName] = at
+	}
+	order := map[verdict.State]int{verdict.Stopped: 0, verdict.Silent: 1, verdict.Unknown: 2, verdict.OK: 3}
+	out := make([]fleetDevice, 0, len(last))
+	for device, seen := range last {
+		state, after := verdict.Quick(s.rules.Route, seen, now, s.grace, s.grace+45*time.Second)
+		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, LastSeen: seen})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if order[out[i].State] != order[out[j].State] {
+			return order[out[i].State] < order[out[j].State]
+		}
+		return out[i].Device < out[j].Device
+	})
+	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Route, "window": window.String(), "devices": out})
 }
 
 func (s *server) journey(w http.ResponseWriter, r *http.Request) {

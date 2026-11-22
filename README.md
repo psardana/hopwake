@@ -13,7 +13,7 @@ Early work. Nothing here is usable yet.
 | Phase | Goal | State |
 | --- | --- | --- |
 | 0. Validate | Reference pipeline with a simulated fleet, baseline with plain OpenTelemetry | Done |
-| 1. Core journey | MQTT and Kafka taps, journey IDs, storage, a device journey view | In progress: taps, store and verdicts work; the view is next |
+| 1. Core journey | MQTT and Kafka taps, journey IDs, storage, a device journey view | In progress: taps, store, verdicts and the journey view work |
 | 2. Transforms and aggregates | Schema diffs per hop, watch mode, aggregation drill-down | Not started |
 
 ## How it works
@@ -48,6 +48,8 @@ DEVICES=50 docker compose -f reference/compose.yaml up -d --build
 docker compose -f deploy/compose.yaml up -d --build
 ```
 
+Open the journey view at http://localhost:8090: the fleet, problems first, and for each device a verdict, the route and its recent readings.
+
 Break one device at the bridge, then ask where its data stops:
 
 ```bash
@@ -64,6 +66,7 @@ No header was needed and nothing in the pipeline changed: the tap derives each r
 
 | Endpoint | Returns |
 | --- | --- |
+| `GET :8090/api/fleet?window=15m` | Every device seen, judged from the last time each hop saw it; problems first |
 | `GET :8090/api/devices/{device}?window=15m` | Verdict, hop counts and the latest journeys of one device |
 | `GET :8090/api/journeys/{journey_id}` | Every hop of one reading |
 
