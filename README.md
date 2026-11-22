@@ -32,6 +32,7 @@ See [docs/architecture.md](docs/architecture.md) and [docs/hop-event.md](docs/ho
 | `docs/` | Architecture and data model |
 | `internal/journey/` | Journey IDs and the per-source rules file: where each source keeps the device and sequence number, and the expected route |
 | `internal/hop/` | Hop events as OTLP spans whose trace ID is the journey ID |
+| `internal/fleet/` | The list of devices that should report, so one that never does is a problem rather than absent |
 | `internal/verdict/` | Decides, from the hops a device's readings reached, whether its data gets through and where it stops |
 | `cmd/tap/` | Passive MQTT and Kafka tap: one hop event per reading seen |
 | `cmd/journey/` | Journey service: device journeys and verdicts from the store |
@@ -66,7 +67,7 @@ No header was needed and nothing in the pipeline changed: the tap derives each r
 
 | Endpoint | Returns |
 | --- | --- |
-| `GET :8090/api/fleet?window=15m` | Every device seen, judged from the last time each hop saw it; problems first |
+| `GET :8090/api/fleet?window=15m` | Every device seen, plus every expected device from the fleet list, judged from the last time each hop saw it; problems first |
 | `GET :8090/api/devices/{device}?window=15m` | Verdict, hop counts and the latest journeys of one device |
 | `GET :8090/api/journeys/{journey_id}` | Every hop of one reading |
 

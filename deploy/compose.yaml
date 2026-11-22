@@ -59,8 +59,10 @@ services:
     environment:
       JOURNEY_RULES: /etc/hopwake/journey-rules.yaml
       JOURNEY_CLICKHOUSE: clickhouse:9000
+      JOURNEY_FLEET: /etc/hopwake/fleet.txt
     volumes:
       - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
+      - ../reference/fleet.txt:/etc/hopwake/fleet.txt:ro
     ports:
       - "8090:8090"
     depends_on:

@@ -23,6 +23,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
+	"github.com/psardana/hopwake/internal/fleet"
 	"github.com/psardana/hopwake/internal/journey"
 	"github.com/psardana/hopwake/internal/verdict"
 )
@@ -64,9 +65,10 @@ var webFiles embed.FS
 var validID = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 type server struct {
-	db    driver.Conn
-	rules *journey.Config
-	grace time.Duration
+	db       driver.Conn
+	rules    *journey.Config
+	grace    time.Duration
+	expected []string // devices that should report; empty when no fleet file is given
 }
 
 func main() {
@@ -74,6 +76,7 @@ func main() {
 	addr := flag.String("clickhouse", env("JOURNEY_CLICKHOUSE", "localhost:9000"), "ClickHouse native address")
 	listen := flag.String("listen", env("JOURNEY_LISTEN", ":8090"), "HTTP address")
 	grace := flag.Duration("grace", 15*time.Second, "how long a reading may take before it is judged")
+	fleetPath := flag.String("fleet", env("JOURNEY_FLEET", ""), "file listing the devices that should report, one per line (optional)")
 	flag.Parse()
 
 	rules, err := journey.LoadConfig(*rulesPath)
@@ -101,7 +104,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	s := &server{db: db, rules: rules, grace: *grace}
+	var expected []string
+	if *fleetPath != "" {
+		if expected, err = fleet.Load(*fleetPath); err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("expecting %d devices from %s", len(expected), *fleetPath)
+	}
+	s := &server{db: db, rules: rules, grace: *grace, expected: expected}
 	mux := http.NewServeMux()
 	web, _ := fs.Sub(webFiles, "web")
 	static := http.FileServerFS(web)
@@ -263,6 +273,8 @@ type fleetDevice struct {
 	State        verdict.State        `json:"state"`
 	StoppedAfter string               `json:"stopped_after,omitempty"`
 	LastSeen     map[string]time.Time `json:"last_seen"`
+	LastEver     *time.Time           `json:"last_ever,omitempty"` // for expected devices not seen in the window
+	Expected     bool                 `json:"expected"`
 }
 
 // fleet judges every device seen in the window from the last time each hop
@@ -300,10 +312,48 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		last[device][hopName] = at
 	}
 	order := map[verdict.State]int{verdict.Stopped: 0, verdict.Silent: 1, verdict.Unknown: 2, verdict.OK: 3}
-	out := make([]fleetDevice, 0, len(last))
+	expected := map[string]bool{}
+	for _, d := range s.expected {
+		expected[d] = true
+	}
+	out := make([]fleetDevice, 0, len(last)+len(s.expected))
 	for device, seen := range last {
 		state, after := verdict.Quick(s.rules.Route, seen, now, s.grace, s.grace+45*time.Second)
-		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, LastSeen: seen})
+		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, LastSeen: seen, Expected: expected[device]})
+	}
+
+	// Expected devices with nothing in the window: silent if ever seen, else never seen.
+	var missing []string
+	for _, d := range s.expected {
+		if _, ok := last[d]; !ok {
+			missing = append(missing, d)
+		}
+	}
+	if len(missing) > 0 {
+		ever := map[string]time.Time{}
+		mrows, err := s.db.Query(r.Context(), `
+			SELECT device, max(ts) FROM hop_events
+			WHERE tenant = ? AND device IN ? GROUP BY device`, s.rules.Tenant, missing)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		for mrows.Next() {
+			var d string
+			var at time.Time
+			if err := mrows.Scan(&d, &at); err != nil {
+				httpError(w, err)
+				return
+			}
+			ever[d] = at
+		}
+		for _, d := range missing {
+			fd := fleetDevice{Device: d, State: verdict.Unknown, LastSeen: map[string]time.Time{}, Expected: true}
+			if at, ok := ever[d]; ok {
+				fd.State, fd.LastEver = verdict.Silent, &at
+			}
+			out = append(out, fd)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if order[out[i].State] != order[out[j].State] {
@@ -311,7 +361,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Device < out[j].Device
 	})
-	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Route, "window": window.String(), "devices": out})
+	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Route, "window": window.String(), "expected": len(s.expected), "devices": out})
 }
 
 func (s *server) journey(w http.ResponseWriter, r *http.Request) {
