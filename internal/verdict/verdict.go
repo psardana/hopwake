@@ -54,8 +54,10 @@ func Decide(device string, route []string, journeys []Journey, now time.Time, gr
 	for i, h := range route {
 		index[h] = i
 	}
+	// Reached is set on the caller's journeys too, so they can show it.
 	var settled []Journey
-	for _, j := range journeys {
+	for k := range journeys {
+		j := &journeys[k]
 		j.Reached = -1
 		for _, h := range j.Hops {
 			if i, ok := index[h.Hop]; ok && i > j.Reached {
@@ -63,7 +65,7 @@ func Decide(device string, route []string, journeys []Journey, now time.Time, gr
 			}
 		}
 		if now.Sub(j.First) >= grace {
-			settled = append(settled, j)
+			settled = append(settled, *j)
 		}
 	}
 	last := len(route) - 1
@@ -131,6 +133,38 @@ func Decide(device string, route []string, journeys []Journey, now time.Time, gr
 	v.Sentence = fmt.Sprintf("%s: readings stop after %s. %d readings since %s did not reach %s.",
 		device, route[stop], run, since.Format("15:04:05 MST"), route[stop+1])
 	return v
+}
+
+// Quick judges a device from only the last time each hop saw it, which is
+// cheap enough to run for a whole fleet. A hop counts as reached when it saw
+// the device within grace of the first hop's latest sighting. silentAfter is
+// how long without any reading at the first hop makes a device silent.
+func Quick(route []string, last map[string]time.Time, now time.Time, grace, silentAfter time.Duration) (State, string) {
+	if len(route) == 0 {
+		return Unknown, ""
+	}
+	first, ok := last[route[0]]
+	if !ok || first.IsZero() {
+		if len(last) == 0 {
+			return Unknown, ""
+		}
+		return Stopped, "" // seen downstream, never at the first hop
+	}
+	if now.Sub(first) > silentAfter {
+		return Silent, ""
+	}
+	reference := first.Add(-grace)
+	reached := 0
+	for i := len(route) - 1; i > 0; i-- {
+		if t, ok := last[route[i]]; ok && !t.Before(reference) {
+			reached = i
+			break
+		}
+	}
+	if reached == len(route)-1 {
+		return OK, ""
+	}
+	return Stopped, route[reached]
 }
 
 func span(h []HopTime) time.Duration {

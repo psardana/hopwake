@@ -25,9 +25,15 @@ func journeys(reach ...int) []Journey {
 }
 
 func TestHealthyDevice(t *testing.T) {
-	v := Decide("dev-00044", route, journeys(2, 2, 2), now, 15*time.Second, nil)
+	js := journeys(2, 2, 2)
+	v := Decide("dev-00044", route, js, now, 15*time.Second, nil)
 	if v.State != OK || v.Median != 20*time.Millisecond || !strings.Contains(v.Sentence, "reach every hop") {
 		t.Fatalf("%+v", v)
+	}
+	for _, j := range js {
+		if j.Reached != 2 {
+			t.Fatalf("the caller's journeys must carry how far they got: %d", j.Reached)
+		}
 	}
 }
 
@@ -67,6 +73,30 @@ func TestSilentAndUnknown(t *testing.T) {
 	}
 	if v := Decide("dev-09999", route, nil, now, 15*time.Second, nil); v.State != Unknown {
 		t.Fatalf("%+v", v)
+	}
+}
+
+func TestQuick(t *testing.T) {
+	g, s := 15*time.Second, 60*time.Second
+	ago := func(d time.Duration) time.Time { return now.Add(-d) }
+	cases := []struct {
+		name  string
+		last  map[string]time.Time
+		state State
+		after string
+	}{
+		{"healthy", map[string]time.Time{route[0]: ago(time.Second), route[1]: ago(time.Second), route[2]: ago(time.Second)}, OK, ""},
+		{"stops after mqtt", map[string]time.Time{route[0]: ago(time.Second), route[1]: ago(3 * time.Minute), route[2]: ago(3 * time.Minute)}, Stopped, route[0]},
+		{"stops before last", map[string]time.Time{route[0]: ago(time.Second), route[1]: ago(time.Second), route[2]: ago(2 * time.Minute)}, Stopped, route[1]},
+		{"just stopped, within grace", map[string]time.Time{route[0]: ago(time.Second), route[1]: ago(10 * time.Second), route[2]: ago(10 * time.Second)}, OK, ""},
+		{"silent", map[string]time.Time{route[0]: ago(5 * time.Minute), route[1]: ago(5 * time.Minute), route[2]: ago(5 * time.Minute)}, Silent, ""},
+		{"never seen", map[string]time.Time{}, Unknown, ""},
+	}
+	for _, c := range cases {
+		state, after := Quick(route, c.last, now, g, s)
+		if state != c.state || after != c.after {
+			t.Errorf("%s: got %s %q, want %s %q", c.name, state, after, c.state, c.after)
+		}
 	}
 }
 
