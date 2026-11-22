@@ -23,11 +23,13 @@ The portal is at http://localhost:8080.
 docker compose -f reference/compose.yaml up -d --build
 ```
 
-The fleet size and reading interval come from `DEVICES` (default 50) and `INTERVAL` (default 5s). `fleet.txt` lists the 50 default devices, so Hopwake knows which ones should report; regenerate it if you change the default:
+The fleet size and reading interval come from `DEVICES` (default 50) and `INTERVAL` (default 5s):
 
 ```bash
 DEVICES=300 INTERVAL=1s docker compose -f reference/compose.yaml up -d --build
 ```
+
+`fleet.txt` lists the 50 default devices, so Hopwake knows which ones should report. With another fleet size, devices beyond the list show as unexpected, and listed ones that do not run show as never seen.
 
 Read a few records from Kafka:
 
