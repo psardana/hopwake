@@ -144,3 +144,5 @@ Each device publishes JSON to `plant/<site>/<device>/telemetry` with a per-devic
 | `-conns` | 10 | MQTT connections shared by the devices |
 | `-qos` | 1 | QoS 0 or 1 |
 | `-duration` | 0 | Stop after this long; 0 runs until interrupted |
+| `-rename-devices` | none | Devices whose firmware sends `temperature` instead of `temp_c` (Compose: `FIRMWARE_RENAME_DEVICES`) |
+| `-rename-after` | 0s | When that firmware change takes effect, after start (Compose: `FIRMWARE_RENAME_AFTER`) |

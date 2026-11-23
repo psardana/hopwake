@@ -183,7 +183,8 @@ services:
       dockerfile: reference/go.Dockerfile
       args:
         CMD: devicesim
-    command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-50}", "-interval", "${INTERVAL:-5s}"]
+    command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-50}", "-interval", "${INTERVAL:-5s}",
+              "-rename-devices", "${FIRMWARE_RENAME_DEVICES:-}", "-rename-after", "${FIRMWARE_RENAME_AFTER:-0s}"]
     depends_on:
       mosquitto:
         condition: service_healthy

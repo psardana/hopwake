@@ -15,6 +15,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -48,7 +49,17 @@ func main() {
 	conns := flag.Int("conns", 10, "MQTT connections shared by the devices")
 	qos := flag.Int("qos", 1, "MQTT QoS for published readings (0 or 1)")
 	duration := flag.Duration("duration", 0, "stop after this long (0 runs until interrupted)")
+	renamed := flag.String("rename-devices", "", "comma-separated devices whose firmware renames temp_c to temperature")
+	renameAfter := flag.Duration("rename-after", 0, "when the firmware change takes effect, after start")
 	flag.Parse()
+
+	renameSet := map[string]bool{}
+	for _, d := range strings.Split(*renamed, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			renameSet[d] = true
+		}
+	}
+	renameAt := time.Now().Add(*renameAfter)
 
 	if *devices < 1 || *sites < 1 || *conns < 1 {
 		log.Fatal("devices, sites and conns must be at least 1")
@@ -99,7 +110,8 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			run(ctx, client, d, *interval, offset, byte(*qos), &sent, &failed)
+			firmware := func(now time.Time) bool { return renameSet[d.id] && !now.Before(renameAt) }
+			run(ctx, client, d, *interval, offset, byte(*qos), firmware, &sent, &failed)
 		}()
 	}
 
@@ -118,7 +130,9 @@ func main() {
 	}
 }
 
-func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Duration, qos byte, sent, failed *atomic.Uint64) {
+// run publishes one device's readings. renamedFirmware reports whether, at a
+// given time, the device runs firmware that sends temperature instead of temp_c.
+func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Duration, qos byte, renamedFirmware func(time.Time) bool, sent, failed *atomic.Uint64) {
 	select {
 	case <-ctx.Done():
 		return
@@ -140,6 +154,9 @@ func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Durat
 			PressureK: round(101.3+rand.NormFloat64()*0.8, 2),
 			Vibration: round(math.Abs(1.5+rand.NormFloat64()*0.5), 3),
 		})
+		if err == nil && renamedFirmware(now) {
+			body, err = renameField(body, "temp_c", "temperature")
+		}
 		if err != nil {
 			failed.Add(1)
 		} else if t := c.Publish(topic, qos, false, body); !t.WaitTimeout(5*time.Second) || t.Error() != nil {
@@ -153,6 +170,16 @@ func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Durat
 		case <-tick.C:
 		}
 	}
+}
+
+func renameField(body []byte, from, to string) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	m[to] = m[from]
+	delete(m, from)
+	return json.Marshal(m)
 }
 
 func round(v float64, places int) float64 {
