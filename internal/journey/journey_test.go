@@ -99,3 +99,24 @@ func TestFromTraceparent(t *testing.T) {
 		}
 	}
 }
+
+func TestBootSeparatesReadingsWithTheSameSeq(t *testing.T) {
+	if ID("t", "d", 1) != BootID("t", "d", "", 1) {
+		t.Fatal("an empty boot must give the same ID as before")
+	}
+	if BootID("t", "d", "7", 1) == BootID("t", "d", "8", 1) || BootID("t", "d", "7", 1) == ID("t", "d", 1) {
+		t.Fatal("different boots must give different IDs")
+	}
+	r := Rule{DeviceField: "device", SeqField: "seq", BootField: "boot"}
+	a, err := r.Extract("", []byte(`{"device":"d","seq":1,"boot":7}`))
+	if err != nil || a.Boot != "7" {
+		t.Fatalf("%+v %v", a, err)
+	}
+	b, _ := r.Extract("", []byte(`{"device":"d","seq":1,"boot":"8"}`))
+	if a.ID() == b.ID() {
+		t.Fatal("boots 7 and 8 share an ID")
+	}
+	if _, err := r.Extract("", []byte(`{"device":"d","seq":1}`)); !errors.Is(err, ErrNoMatch) {
+		t.Fatalf("missing boot field: %v", err)
+	}
+}

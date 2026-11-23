@@ -20,10 +20,20 @@ import (
 // device's own sequence number. Any hop that knows these three values computes
 // the same ID.
 func ID(tenant, device string, seq uint64) string {
+	return BootID(tenant, device, "", seq)
+}
+
+// BootID is ID for devices that report a boot counter or boot ID: readings
+// from different boots never share a journey ID, even when the sequence
+// number starts again. An empty boot gives the same ID as ID.
+func BootID(tenant, device, boot string, seq uint64) string {
 	h := sha256.New()
 	writeField(h, "hopwake/journey/v1")
 	writeField(h, tenant)
 	writeField(h, device)
+	if boot != "" {
+		writeField(h, "boot:"+boot)
+	}
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], seq)
 	h.Write(b[:])
@@ -79,17 +89,19 @@ type Rule struct {
 	TopicPattern string
 	DeviceField  string
 	SeqField     string
+	BootField    string // optional: a boot counter or boot ID in the payload
 }
 
 // Key is what a rule extracts from one message.
 type Key struct {
 	Tenant string
 	Device string
+	Boot   string // empty when the source has no boot field
 	Seq    uint64
 }
 
 // ID returns the journey ID for the key.
-func (k Key) ID() string { return ID(k.Tenant, k.Device, k.Seq) }
+func (k Key) ID() string { return BootID(k.Tenant, k.Device, k.Boot, k.Seq) }
 
 // ErrNoMatch means the message does not carry what the rule looks for.
 var ErrNoMatch = errors.New("journey: message does not match the rule")
@@ -131,6 +143,16 @@ func (r Rule) Extract(topic string, payload []byte) (Key, error) {
 		return Key{}, fmt.Errorf("%w: %q is not a sequence number", ErrNoMatch, r.SeqField)
 	}
 	k.Seq = seq
+	if r.BootField != "" {
+		raw, ok := body[r.BootField]
+		if !ok {
+			return Key{}, fmt.Errorf("%w: no %q field", ErrNoMatch, r.BootField)
+		}
+		k.Boot = strings.Trim(string(raw), `"`)
+		if k.Boot == "" {
+			return Key{}, fmt.Errorf("%w: %q is empty", ErrNoMatch, r.BootField)
+		}
+	}
 	return k, nil
 }
 

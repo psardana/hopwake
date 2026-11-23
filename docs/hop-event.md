@@ -56,7 +56,7 @@ Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them.
 
 | Attribute | Field |
 | --- | --- |
-| `hopwake.schema` | `hop/v0` |
+| `hopwake.schema` | `hop/v1` (adds the shape attributes to `hop/v0`) |
 | `hopwake.tenant` | `tenant` |
 | `hopwake.device.id` | `device_id` |
 | `hopwake.seq` | the device's sequence number |
@@ -65,6 +65,8 @@ Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them.
 | `hopwake.op` | `op` |
 | `hopwake.correlation` | `correlation` |
 | `hopwake.payload.bytes` | `bytes` |
+| `hopwake.schema.fp` | fingerprint of the payload's shape (field paths and types) at this hop |
+| `hopwake.shape.fields` | the shape's fields, on the first event of a new shape only |
 | `messaging.system`, `messaging.destination.name` | where the reading was seen, per the OpenTelemetry messaging conventions |
 
 ## Journey ID
@@ -74,6 +76,13 @@ Resolved in this order:
 1. `traceparent` on the message (MQTT 5 user property, Kafka header, AMQP property, HTTP header): use its trace ID.
 2. Otherwise `hash(tenant, device_id, seq)`, or `hash(tenant, device_id, device_ts)` when there is no sequence number. The fields are extracted by a configured rule per topic (topic pattern or JSON path).
 3. Otherwise the first tap mints an ID and later hops match on device ID within a time window. Such links are marked `inferred`.
+
+### Device reboots
+
+A device that reboots usually starts its sequence number again, so its new readings derive the same journey IDs as old ones. Two safeguards:
+
+- **Boot field.** When the payload carries a boot counter or boot ID, `boot_field` on the source adds it to the journey ID, so readings from different boots never share an ID. Every source on a route must name the same boot information.
+- **Time split.** Without a boot field, the journey service treats events with the same journey ID that lie more than `-journey-span` apart (default 60 s) as different readings. This fails only if a device reboots and reaches the same sequence number within that span.
 
 ## Window record
 

@@ -47,6 +47,7 @@ type Source struct {
 	DeviceFromTopic string `yaml:"device_from_topic"`
 	DeviceField     string `yaml:"device_field"`
 	SeqField        string `yaml:"seq_field"`
+	BootField       string `yaml:"boot_field"` // optional; every source of a route must agree on it
 }
 
 // LoadConfig reads and checks a rules file.
@@ -141,7 +142,7 @@ func (c *Config) Rule(kind, topic string) (Rule, bool) {
 	if !ok {
 		return Rule{}, false
 	}
-	return Rule{Tenant: c.Tenant, TopicPattern: s.DeviceFromTopic, DeviceField: s.DeviceField, SeqField: s.SeqField}, true
+	return Rule{Tenant: c.Tenant, TopicPattern: s.DeviceFromTopic, DeviceField: s.DeviceField, SeqField: s.SeqField, BootField: s.BootField}, true
 }
 
 // topicMatches applies MQTT filter rules: + matches one level, # the rest.
