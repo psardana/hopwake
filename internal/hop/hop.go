@@ -30,8 +30,11 @@ const (
 	AttrBytes       = "hopwake.payload.bytes"
 	AttrSystem      = "messaging.system"
 	AttrDestination = "messaging.destination.name"
+	AttrShapeFP     = "hopwake.schema.fp"
+	AttrShapeFields = "hopwake.shape.fields"
 
-	SchemaVersion = "hop/v0"
+	// SchemaVersion hop/v1 adds the shape attributes to hop/v0.
+	SchemaVersion = "hop/v1"
 )
 
 // Op is what a hop did with the reading.
@@ -71,6 +74,8 @@ type Event struct {
 	Correlation Correlation
 	Bytes       int
 	At          time.Time
+	ShapeFP     string // fingerprint of the payload's shape at this hop
+	ShapeFields string // the shape's fields, sent with the first event of a new shape only
 }
 
 // Validate reports what is wrong with an event, if anything.
@@ -120,6 +125,12 @@ func (r *Recorder) Record(ctx context.Context, e Event) error {
 			attribute.String(AttrSystem, e.System),
 			attribute.String(AttrDestination, e.Destination),
 		))
+	if e.ShapeFP != "" {
+		span.SetAttributes(attribute.String(AttrShapeFP, e.ShapeFP))
+	}
+	if e.ShapeFields != "" {
+		span.SetAttributes(attribute.String(AttrShapeFields, e.ShapeFields))
+	}
 	span.End(trace.WithTimestamp(at))
 	return nil
 }

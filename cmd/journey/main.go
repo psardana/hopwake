@@ -40,11 +40,16 @@ var schema = []string{
 		hop LowCardinality(String),
 		op LowCardinality(String),
 		correlation LowCardinality(String),
-		bytes UInt32
+		bytes UInt32,
+		schema_fp LowCardinality(String)
 	) ENGINE = MergeTree
 	ORDER BY (tenant, device, ts)
 	TTL toDateTime(ts) + INTERVAL 3 DAY`,
-	`CREATE MATERIALIZED VIEW IF NOT EXISTS hop_events_mv TO hop_events AS
+	// Stores created by hop/v0 lack the shape column.
+	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS schema_fp LowCardinality(String)`,
+	// The view is replaced on every start so that it always matches this code.
+	`DROP VIEW IF EXISTS hop_events_mv`,
+	`CREATE MATERIALIZED VIEW hop_events_mv TO hop_events AS
 	SELECT
 		SpanAttributes['hopwake.tenant'] AS tenant,
 		SpanAttributes['hopwake.device.id'] AS device,
@@ -54,9 +59,30 @@ var schema = []string{
 		SpanAttributes['hopwake.hop'] AS hop,
 		SpanAttributes['hopwake.op'] AS op,
 		SpanAttributes['hopwake.correlation'] AS correlation,
-		toUInt32OrZero(SpanAttributes['hopwake.payload.bytes']) AS bytes
+		toUInt32OrZero(SpanAttributes['hopwake.payload.bytes']) AS bytes,
+		SpanAttributes['hopwake.schema.fp'] AS schema_fp
 	FROM otel_traces
-	WHERE SpanAttributes['hopwake.schema'] = 'hop/v0'`,
+	WHERE SpanAttributes['hopwake.schema'] IN ('hop/v0', 'hop/v1')`,
+	// One row per shape per hop and tap start: the fields arrive with the first
+	// event of a shape. Read with min(first_seen) per shape.
+	`CREATE TABLE IF NOT EXISTS shapes (
+		tenant LowCardinality(String),
+		hop LowCardinality(String),
+		fingerprint String,
+		fields String,
+		first_seen DateTime64(9)
+	) ENGINE = MergeTree
+	ORDER BY (tenant, hop, fingerprint)`,
+	`DROP VIEW IF EXISTS shapes_mv`,
+	`CREATE MATERIALIZED VIEW shapes_mv TO shapes AS
+	SELECT
+		SpanAttributes['hopwake.tenant'] AS tenant,
+		SpanAttributes['hopwake.hop'] AS hop,
+		SpanAttributes['hopwake.schema.fp'] AS fingerprint,
+		SpanAttributes['hopwake.shape.fields'] AS fields,
+		Timestamp AS first_seen
+	FROM otel_traces
+	WHERE SpanAttributes['hopwake.shape.fields'] != ''`,
 }
 
 //go:embed web

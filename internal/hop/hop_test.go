@@ -24,9 +24,14 @@ func TestHopsOfOneReadingShareATrace(t *testing.T) {
 	id := journey.ID("reference", "dev-00042", 7)
 	at := time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 	for i, h := range []string{"mqtt:plant/+/+/telemetry", "kafka:telemetry.raw", "kafka:telemetry.normalized"} {
+		fields := "" // only the raw hop announces its shape's fields in this test
+		if i == 1 {
+			fields = "seq:number"
+		}
 		err := r.Record(context.Background(), Event{
 			JourneyID: id, Tenant: "reference", Device: "dev-00042", Seq: 7,
 			Hop: h, Op: OpReceive, Correlation: Derived, At: at.Add(time.Duration(i) * 10 * time.Millisecond),
+			ShapeFP: "3a9c0d11e2f4b5a6", ShapeFields: fields,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -52,11 +57,16 @@ func TestHopsOfOneReadingShareATrace(t *testing.T) {
 	if len(seen) != 3 {
 		t.Fatal("span IDs must differ")
 	}
+	for _, a := range spans[0].Attributes {
+		if string(a.Key) == AttrShapeFields {
+			t.Fatal("shape fields are only sent when given")
+		}
+	}
 	attrs := map[string]string{}
 	for _, a := range spans[1].Attributes {
 		attrs[string(a.Key)] = a.Value.Emit()
 	}
-	for k, want := range map[string]string{AttrDevice: "dev-00042", AttrHop: "kafka:telemetry.raw", AttrSeq: "7", AttrSchema: SchemaVersion, AttrCorrelation: "derived"} {
+	for k, want := range map[string]string{AttrDevice: "dev-00042", AttrHop: "kafka:telemetry.raw", AttrSeq: "7", AttrSchema: SchemaVersion, AttrCorrelation: "derived", AttrShapeFP: "3a9c0d11e2f4b5a6", AttrShapeFields: "seq:number"} {
 		if attrs[k] != want {
 			t.Errorf("%s = %q, want %q", k, attrs[k], want)
 		}

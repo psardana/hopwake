@@ -29,6 +29,7 @@ import (
 
 	"github.com/psardana/hopwake/internal/hop"
 	"github.com/psardana/hopwake/internal/journey"
+	"github.com/psardana/hopwake/internal/shape"
 )
 
 type counts struct {
@@ -94,6 +95,7 @@ func main() {
 	}()
 	rec := hop.NewRecorder(tp)
 	cnt := &counts{seen: map[string]int{}, unparsed: map[string]int{}}
+	var announced sync.Map // hop + fingerprint → struct{}: shapes whose fields were already sent
 
 	observe := func(kind, topic string, payload []byte) {
 		src, ok := rules.Source(kind, topic)
@@ -105,6 +107,11 @@ func main() {
 		if err != nil {
 			cnt.add(cnt.unparsed, src.HopName())
 			return
+		}
+		sh := shape.Of(payload)
+		fields := ""
+		if _, done := announced.LoadOrStore(src.HopName()+" "+sh.Fingerprint, struct{}{}); !done {
+			fields = sh.String()
 		}
 		err = rec.Record(ctx, hop.Event{
 			JourneyID:   key.ID(),
@@ -118,6 +125,8 @@ func main() {
 			Correlation: hop.Derived,
 			Bytes:       len(payload),
 			At:          time.Now(),
+			ShapeFP:     sh.Fingerprint,
+			ShapeFields: fields,
 		})
 		if err != nil {
 			cnt.add(cnt.unparsed, src.HopName())
