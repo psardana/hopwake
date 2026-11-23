@@ -167,6 +167,39 @@ func Quick(route []string, last map[string]time.Time, now time.Time, grace, sile
 	return Stopped, route[reached]
 }
 
+// Event is one hop event as read from the store.
+type Event struct {
+	JourneyID string
+	Seq       uint64
+	Hop       string
+	At        time.Time
+}
+
+// Assemble groups hop events into journeys, newest first. Events that share a
+// journey ID but lie more than maxSpan apart belong to different readings: a
+// device that rebooted and started its sequence number again produces the
+// same journey IDs as before, but long after them.
+func Assemble(events []Event, maxSpan time.Duration) []Journey {
+	sorted := append([]Event(nil), events...)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].JourneyID != sorted[j].JourneyID {
+			return sorted[i].JourneyID < sorted[j].JourneyID
+		}
+		return sorted[i].At.Before(sorted[j].At)
+	})
+	var out []Journey
+	for _, e := range sorted {
+		n := len(out)
+		if n > 0 && out[n-1].ID == e.JourneyID && e.At.Sub(out[n-1].First) <= maxSpan {
+			out[n-1].Hops = append(out[n-1].Hops, HopTime{Hop: e.Hop, At: e.At})
+			continue
+		}
+		out = append(out, Journey{ID: e.JourneyID, Seq: e.Seq, First: e.At, Hops: []HopTime{{Hop: e.Hop, At: e.At}}})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].First.After(out[j].First) })
+	return out
+}
+
 func span(h []HopTime) time.Duration {
 	lo, hi := h[0].At, h[0].At
 	for _, x := range h[1:] {

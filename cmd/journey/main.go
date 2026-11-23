@@ -25,6 +25,7 @@ import (
 
 	"github.com/psardana/hopwake/internal/fleet"
 	"github.com/psardana/hopwake/internal/journey"
+	"github.com/psardana/hopwake/internal/shape"
 	"github.com/psardana/hopwake/internal/verdict"
 )
 
@@ -94,7 +95,8 @@ type server struct {
 	db       driver.Conn
 	rules    *journey.Config
 	grace    time.Duration
-	expected []string // devices that should report; empty when no fleet file is given
+	expected []string      // devices that should report; empty when no fleet file is given
+	span     time.Duration // the longest a reading may take across all hops
 }
 
 func main() {
@@ -102,6 +104,7 @@ func main() {
 	addr := flag.String("clickhouse", env("JOURNEY_CLICKHOUSE", "localhost:9000"), "ClickHouse native address")
 	listen := flag.String("listen", env("JOURNEY_LISTEN", ":8090"), "HTTP address")
 	grace := flag.Duration("grace", 15*time.Second, "how long a reading may take before it is judged")
+	span := flag.Duration("journey-span", 60*time.Second, "events with the same journey ID further apart than this are different readings (a device reboot restarts its sequence)")
 	fleetPath := flag.String("fleet", env("JOURNEY_FLEET", ""), "file listing the devices that should report, one per line (optional)")
 	flag.Parse()
 
@@ -137,7 +140,7 @@ func main() {
 		}
 		log.Printf("expecting %d devices from %s", len(expected), *fleetPath)
 	}
-	s := &server{db: db, rules: rules, grace: *grace, expected: expected}
+	s := &server{db: db, rules: rules, grace: *grace, expected: expected, span: *span}
 	mux := http.NewServeMux()
 	web, _ := fs.Sub(webFiles, "web")
 	static := http.FileServerFS(web)
@@ -222,33 +225,31 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	from := now.Add(-window)
 
 	rows, err := s.db.Query(ctx, `
-		SELECT journey_id, any(seq), min(ts), groupArray(hop), groupArray(ts)
+		SELECT journey_id, seq, hop, ts
 		FROM hop_events
 		WHERE tenant = ? AND device = ? AND ts >= ?
-		GROUP BY journey_id
-		ORDER BY min(ts) DESC
-		LIMIT 500`, tenant, device, from)
+		ORDER BY ts DESC
+		LIMIT 20000`, tenant, device, from)
 	if err != nil {
 		httpError(w, err)
 		return
 	}
-	var js []verdict.Journey
+	var events []verdict.Event
 	for rows.Next() {
-		var j verdict.Journey
-		var hops []string
-		var times []time.Time
-		if err := rows.Scan(&j.ID, &j.Seq, &j.First, &hops, &times); err != nil {
+		var e verdict.Event
+		if err := rows.Scan(&e.JourneyID, &e.Seq, &e.Hop, &e.At); err != nil {
 			httpError(w, err)
 			return
 		}
-		for i := range hops {
-			j.Hops = append(j.Hops, verdict.HopTime{Hop: hops[i], At: times[i]})
-		}
-		js = append(js, j)
+		events = append(events, e)
 	}
 	if err := rows.Err(); err != nil {
 		httpError(w, err)
 		return
+	}
+	js := verdict.Assemble(events, s.span)
+	if len(js) > 500 {
+		js = js[:500]
 	}
 
 	var lastSeen *verdict.HopTime
@@ -279,6 +280,12 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		stats = append(stats, h)
 	}
 
+	shapes, err := s.shapeHistory(ctx, tenant, device, from)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+
 	v := verdict.Decide(device, s.rules.Route, js, now, s.grace, lastSeen)
 	if len(js) > 50 {
 		js = js[:50]
@@ -290,8 +297,90 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		"route":    s.rules.Route,
 		"verdict":  v,
 		"hops":     stats,
+		"shapes":   shapes,
 		"journeys": js,
 	})
+}
+
+type shapeSeen struct {
+	Fingerprint string    `json:"fingerprint"`
+	Fields      []string  `json:"fields,omitempty"`
+	Count       uint64    `json:"count"`
+	First       time.Time `json:"first"`
+	Last        time.Time `json:"last"`
+}
+
+type hopShapes struct {
+	Hop      string        `json:"hop"`
+	Current  shapeSeen     `json:"current"`
+	Previous *shapeSeen    `json:"previous,omitempty"`
+	Change   *shape.Change `json:"change,omitempty"`
+}
+
+// shapeHistory reports, per hop, the device's current payload shape and, when
+// it changed in the window, the one before and what moved between them.
+func (s *server) shapeHistory(ctx context.Context, tenant, device string, from time.Time) ([]hopShapes, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT hop, schema_fp, count(), min(ts), max(ts) FROM hop_events
+		WHERE tenant = ? AND device = ? AND ts >= ? AND schema_fp != ''
+		GROUP BY hop, schema_fp
+		ORDER BY hop, max(ts)`, tenant, device, from)
+	if err != nil {
+		return nil, err
+	}
+	byHop := map[string][]shapeSeen{}
+	var fps []string
+	for rows.Next() {
+		var h string
+		var x shapeSeen
+		if err := rows.Scan(&h, &x.Fingerprint, &x.Count, &x.First, &x.Last); err != nil {
+			return nil, err
+		}
+		byHop[h] = append(byHop[h], x)
+		fps = append(fps, x.Fingerprint)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	fields := map[string]string{}
+	if len(fps) > 0 {
+		frows, err := s.db.Query(ctx, `SELECT fingerprint, any(fields) FROM shapes WHERE tenant = ? AND fingerprint IN ? GROUP BY fingerprint`, tenant, fps)
+		if err != nil {
+			return nil, err
+		}
+		for frows.Next() {
+			var fp, f string
+			if err := frows.Scan(&fp, &f); err != nil {
+				return nil, err
+			}
+			fields[fp] = f
+		}
+	}
+	withFields := func(x shapeSeen) shapeSeen {
+		if f, ok := fields[x.Fingerprint]; ok {
+			x.Fields = strings.Fields(f)
+		}
+		return x
+	}
+	out := []hopShapes{}
+	for _, h := range s.rules.Route {
+		seen := byHop[h]
+		if len(seen) == 0 {
+			continue
+		}
+		// Rows are ordered by when each shape was last seen: the last one is current.
+		hs := hopShapes{Hop: h, Current: withFields(seen[len(seen)-1])}
+		if len(seen) > 1 {
+			prev := withFields(seen[len(seen)-2])
+			hs.Previous = &prev
+			if fields[prev.Fingerprint] != "" && fields[hs.Current.Fingerprint] != "" {
+				c := shape.Diff(shape.Parse(fields[prev.Fingerprint]), shape.Parse(fields[hs.Current.Fingerprint]))
+				hs.Change = &c
+			}
+		}
+		out = append(out, hs)
+	}
+	return out, nil
 }
 
 type fleetDevice struct {
@@ -301,6 +390,7 @@ type fleetDevice struct {
 	LastSeen     map[string]time.Time `json:"last_seen"`
 	LastEver     *time.Time           `json:"last_ever,omitempty"` // for expected devices not seen in the window
 	Expected     bool                 `json:"expected"`
+	ShapeChanged bool                 `json:"shape_changed"` // more than one payload shape at a hop in the window
 }
 
 // fleet judges every device seen in the window from the last time each hop
@@ -337,6 +427,26 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		}
 		last[device][hopName] = at
 	}
+	changed := map[string]bool{}
+	crows, err := s.db.Query(r.Context(), `
+		SELECT DISTINCT device FROM (
+			SELECT device, hop FROM hop_events
+			WHERE tenant = ? AND ts >= ? AND schema_fp != ''
+			GROUP BY device, hop
+			HAVING uniqExact(schema_fp) > 1)`, s.rules.Tenant, now.Add(-window))
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	for crows.Next() {
+		var d string
+		if err := crows.Scan(&d); err != nil {
+			httpError(w, err)
+			return
+		}
+		changed[d] = true
+	}
+
 	order := map[verdict.State]int{verdict.Stopped: 0, verdict.Silent: 1, verdict.Unknown: 2, verdict.OK: 3}
 	expected := map[string]bool{}
 	for _, d := range s.expected {
@@ -345,7 +455,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 	out := make([]fleetDevice, 0, len(last)+len(s.expected))
 	for device, seen := range last {
 		state, after := verdict.Quick(s.rules.Route, seen, now, s.grace, s.grace+45*time.Second)
-		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, LastSeen: seen, Expected: expected[device]})
+		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, LastSeen: seen, Expected: expected[device], ShapeChanged: changed[device]})
 	}
 
 	// Expected devices with nothing in the window: silent if ever seen, else never seen.

@@ -108,3 +108,25 @@ func TestHopsOutsideTheRouteAreIgnored(t *testing.T) {
 		t.Fatalf("%+v", v)
 	}
 }
+
+func TestAssembleSplitsReadingsFromDifferentBoots(t *testing.T) {
+	t0 := now.Add(-10 * time.Minute)
+	ev := []Event{
+		// seq 1 before the reboot, at two hops
+		{JourneyID: "a", Seq: 1, Hop: route[0], At: t0},
+		{JourneyID: "a", Seq: 1, Hop: route[1], At: t0.Add(20 * time.Millisecond)},
+		// seq 1 again, five minutes later, after a reboot: only at the first hop
+		{JourneyID: "a", Seq: 1, Hop: route[0], At: t0.Add(5 * time.Minute)},
+		{JourneyID: "b", Seq: 2, Hop: route[0], At: t0.Add(time.Second)},
+	}
+	js := Assemble(ev, time.Minute)
+	if len(js) != 3 {
+		t.Fatalf("got %d journeys: %+v", len(js), js)
+	}
+	if !js[0].First.Equal(t0.Add(5*time.Minute)) || len(js[0].Hops) != 1 {
+		t.Fatalf("newest first, and the rebooted reading stands alone: %+v", js[0])
+	}
+	if js[2].ID != "a" || len(js[2].Hops) != 2 {
+		t.Fatalf("the original reading keeps both hops: %+v", js[2])
+	}
+}
