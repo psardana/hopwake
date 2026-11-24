@@ -55,7 +55,14 @@ func (s *server) windowRecords(ctx context.Context, key string, from time.Time) 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// Missing devices, per key, against the previous windows of that key.
+	return markMissing(all, from), nil
+}
+
+// markMissing works out, for records in key and time order, which devices
+// each one is missing: devices that fed the key's windows in the lookback
+// before it but not this one. It returns the records that end at or after
+// from. Records with only a digest of their devices get no missing list.
+func markMissing(all []windowRecord, from time.Time) []windowRecord {
 	out := []windowRecord{}
 	for i := range all {
 		w := &all[i]
@@ -82,7 +89,7 @@ func (s *server) windowRecords(ctx context.Context, key string, from time.Time) 
 			out = append(out, *w)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // windows lists recent aggregated outputs, newest first, with the devices
