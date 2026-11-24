@@ -8,7 +8,7 @@ runs without a collector.
 import os
 
 from opentelemetry import propagate, trace
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import SpanKind, Status, StatusCode  # noqa: F401 (used by the normaliser)
 
 TRACE_HEADERS = ("traceparent", "tracestate")
 

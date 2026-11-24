@@ -115,6 +115,106 @@ var schema = []string{
 		toUInt32OrZero(SpanAttributes['hopwake.tap.every_ms']) AS every_ms
 	FROM otel_traces
 	WHERE SpanAttributes['hopwake.schema'] = 'tap/v1'`,
+	// Watch mode: who watched which device until when. Every change is a new
+	// row, so the table is also the log; the newest row per device counts.
+	`CREATE TABLE IF NOT EXISTS watches (
+		tenant LowCardinality(String),
+		device String,
+		until DateTime64(3),
+		by String,
+		note String,
+		at DateTime64(3)
+	) ENGINE = MergeTree
+	ORDER BY (tenant, device, at)`,
+	// Payloads of watched devices, as the tap sent them (already redacted).
+	`CREATE TABLE IF NOT EXISTS payload_samples (
+		tenant LowCardinality(String),
+		device String,
+		ts DateTime64(9),
+		journey_id String,
+		seq UInt64,
+		hop LowCardinality(String),
+		payload String
+	) ENGINE = MergeTree
+	ORDER BY (tenant, device, ts)
+	TTL toDateTime(ts) + INTERVAL 24 HOUR`,
+	`DROP VIEW IF EXISTS payload_samples_mv`,
+	`CREATE MATERIALIZED VIEW payload_samples_mv TO payload_samples AS
+	SELECT
+		SpanAttributes['hopwake.tenant'] AS tenant,
+		SpanAttributes['hopwake.device.id'] AS device,
+		Timestamp AS ts,
+		TraceId AS journey_id,
+		toUInt64OrZero(SpanAttributes['hopwake.seq']) AS seq,
+		SpanAttributes['hopwake.hop'] AS hop,
+		SpanAttributes['hopwake.payload'] AS payload
+	FROM otel_traces
+	WHERE SpanAttributes['hopwake.payload'] != ''`,
+	// Aggregated outputs and how to find the readings behind them.
+	`CREATE TABLE IF NOT EXISTS window_records (
+		tenant LowCardinality(String),
+		hop LowCardinality(String),
+		ts DateTime64(9),
+		op LowCardinality(String),
+		group_key String,
+		window_start DateTime64(3),
+		window_end DateTime64(3),
+		input_hop LowCardinality(String),
+		inputs UInt32,
+		device_count UInt32,
+		devices Array(String),
+		device_digest String,
+		output String
+	) ENGINE = MergeTree
+	ORDER BY (tenant, group_key, window_start)
+	TTL toDateTime(ts) + INTERVAL 3 DAY`,
+	`DROP VIEW IF EXISTS window_records_mv`,
+	`CREATE MATERIALIZED VIEW window_records_mv TO window_records AS
+	SELECT
+		SpanAttributes['hopwake.tenant'] AS tenant,
+		SpanAttributes['hopwake.hop'] AS hop,
+		Timestamp AS ts,
+		SpanAttributes['hopwake.window.op'] AS op,
+		SpanAttributes['hopwake.window.key'] AS group_key,
+		parseDateTime64BestEffort(SpanAttributes['hopwake.window.start'], 3) AS window_start,
+		parseDateTime64BestEffort(SpanAttributes['hopwake.window.end'], 3) AS window_end,
+		SpanAttributes['hopwake.window.input_hop'] AS input_hop,
+		toUInt32OrZero(SpanAttributes['hopwake.window.inputs']) AS inputs,
+		toUInt32OrZero(SpanAttributes['hopwake.window.device_count']) AS device_count,
+		arrayFilter(x -> x != '', splitByChar(',', SpanAttributes['hopwake.window.devices'])) AS devices,
+		SpanAttributes['hopwake.window.device_digest'] AS device_digest,
+		SpanAttributes['hopwake.window.output'] AS output
+	FROM otel_traces
+	WHERE SpanAttributes['hopwake.schema'] = 'window/v1'`,
+	// Every message per device, hop and five minutes, sampled or not.
+	`CREATE TABLE IF NOT EXISTS device_counters (
+		tenant LowCardinality(String),
+		device String,
+		hop LowCardinality(String),
+		bucket DateTime,
+		n SimpleAggregateFunction(sum, UInt64),
+		errors SimpleAggregateFunction(sum, UInt64),
+		last_seen SimpleAggregateFunction(max, DateTime64(3))
+	) ENGINE = AggregatingMergeTree
+	ORDER BY (tenant, device, hop, bucket)
+	TTL bucket + INTERVAL 30 DAY`,
+	`DROP VIEW IF EXISTS device_counters_mv`,
+	`CREATE MATERIALIZED VIEW device_counters_mv TO device_counters AS
+	SELECT
+		SpanAttributes['hopwake.tenant'] AS tenant,
+		c.1 AS device,
+		SpanAttributes['hopwake.hop'] AS hop,
+		toStartOfFiveMinutes(Timestamp) AS bucket,
+		toUInt64(c.2) AS n,
+		toUInt64(c.3) AS errors,
+		fromUnixTimestamp64Milli(toInt64(c.4)) AS last_seen
+	FROM otel_traces
+	ARRAY JOIN arrayZip(
+		splitByChar(',', SpanAttributes['hopwake.counts.devices']),
+		arrayMap(x -> toUInt64OrZero(x), splitByChar(',', SpanAttributes['hopwake.counts.n'])),
+		arrayMap(x -> toUInt64OrZero(x), splitByChar(',', SpanAttributes['hopwake.counts.errors'])),
+		arrayMap(x -> toInt64OrZero(x), splitByChar(',', SpanAttributes['hopwake.counts.last_ms']))) AS c
+	WHERE SpanAttributes['hopwake.schema'] = 'counts/v1'`,
 }
 
 //go:embed web
@@ -183,6 +283,12 @@ func main() {
 	mux.HandleFunc("GET /api/fleet", s.fleet)
 	mux.HandleFunc("GET /api/devices/{device}", s.device)
 	mux.HandleFunc("GET /api/journeys/{id}", s.journey)
+	mux.HandleFunc("GET /api/watches", s.watches)
+	mux.HandleFunc("GET /api/mappings", s.mappings)
+	mux.HandleFunc("GET /api/windows", s.windows)
+	mux.HandleFunc("GET /api/windows/{key}/{start}", s.windowDetail)
+	mux.HandleFunc("POST /api/devices/{device}/watch", s.watch)
+	mux.HandleFunc("DELETE /api/devices/{device}/watch", s.unwatch)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Ping(r.Context()); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -233,6 +339,13 @@ type hopStat struct {
 	Hop      string    `json:"hop"`
 	Count    uint64    `json:"count"`
 	LastSeen time.Time `json:"last_seen"`
+	// Readings that broke the hop's declared schema, and the latest reason.
+	Invalid       uint64 `json:"invalid"`
+	InvalidReason string `json:"invalid_reason,omitempty"`
+	// From counters, which cover every message whether sampled or not, in
+	// five-minute buckets from the start of the window.
+	Counted       uint64 `json:"counted"`
+	CountedErrors uint64 `json:"counted_errors"`
 }
 
 func (s *server) device(w http.ResponseWriter, r *http.Request) {
@@ -295,7 +408,7 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 
 	stats := []hopStat{}
 	srows, err := s.db.Query(ctx, `
-		SELECT hop, count(), max(ts) FROM hop_events
+		SELECT hop, count(), max(ts), countIf(op = 'error'), argMaxIf(reason, ts, op = 'error') FROM hop_events
 		WHERE tenant = ? AND device = ? AND ts >= ?
 		GROUP BY hop`, tenant, device, from)
 	if err != nil {
@@ -304,11 +417,35 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	}
 	for srows.Next() {
 		var h hopStat
-		if err := srows.Scan(&h.Hop, &h.Count, &h.LastSeen); err != nil {
+		if err := srows.Scan(&h.Hop, &h.Count, &h.LastSeen, &h.Invalid, &h.InvalidReason); err != nil {
 			httpError(w, err)
 			return
 		}
 		stats = append(stats, h)
+	}
+
+	// Counters cover every message, so they show how much the hop events
+	// above were sampled.
+	crows, err := s.db.Query(ctx, `
+		SELECT hop, sum(n), sum(errors) FROM device_counters
+		WHERE tenant = ? AND device = ? AND bucket >= toStartOfFiveMinutes(?)
+		GROUP BY hop`, tenant, device, from)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	counted := map[string][2]uint64{}
+	for crows.Next() {
+		var h string
+		var n, e uint64
+		if err := crows.Scan(&h, &n, &e); err != nil {
+			httpError(w, err)
+			return
+		}
+		counted[h] = [2]uint64{n, e}
+	}
+	for i := range stats {
+		stats[i].Counted, stats[i].CountedErrors = counted[stats[i].Hop][0], counted[stats[i].Hop][1]
 	}
 
 	shapes, err := s.shapeHistory(ctx, tenant, device, from)
@@ -317,7 +454,25 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := verdict.Decide(device, s.rules.Hops(), js, now, s.grace, lastSeen)
+	fed, missed, err := s.deviceWindows(ctx, device, from)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	found, err := s.findings(ctx, device, from)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	var watching *watchState
+	if ws, err := s.activeWatches(ctx, device); err != nil {
+		httpError(w, err)
+		return
+	} else if len(ws) > 0 {
+		watching = &ws[0]
+	}
+
+	v := verdict.Decide(device, s.rules.RequiredHops(), js, now, s.grace, lastSeen)
 	v.At(device, s.rules.Via(v.NotReached))
 	blind, err := s.blindness(ctx, from, now)
 	if err != nil {
@@ -336,16 +491,20 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		js = js[:50]
 	}
 	writeJSON(w, map[string]any{
-		"tenant":   tenant,
-		"device":   device,
-		"window":   window.String(),
-		"route":    s.rules.Hops(),
-		"via":      s.via(),
-		"tap":      blindList(blind),
-		"verdict":  v,
-		"hops":     stats,
-		"shapes":   shapes,
-		"journeys": js,
+		"tenant":     tenant,
+		"device":     device,
+		"window":     window.String(),
+		"route":      s.rules.Hops(),
+		"optional":   s.optional(),
+		"via":        s.via(),
+		"tap":        blindList(blind),
+		"watch":      watching,
+		"findings":   found,
+		"aggregates": map[string]any{"fed": fed, "missing": missed},
+		"verdict":    v,
+		"hops":       stats,
+		"shapes":     shapes,
+		"journeys":   js,
 	})
 }
 
@@ -439,7 +598,10 @@ type fleetDevice struct {
 	LastSeen     map[string]time.Time `json:"last_seen"`
 	LastEver     *time.Time           `json:"last_ever,omitempty"` // for expected devices not seen in the window
 	Expected     bool                 `json:"expected"`
-	ShapeChanged bool                 `json:"shape_changed"` // more than one payload shape at a hop in the window
+	ShapeChanged bool                 `json:"shape_changed"`          // more than one payload shape at a hop in the window
+	Invalid      uint64               `json:"invalid,omitempty"`      // hop events that broke a declared schema in the window
+	WrongValues  int                  `json:"wrong_values,omitempty"` // watched readings that broke a confirmed mapping
+	Watched      bool                 `json:"watched,omitempty"`
 }
 
 // fleet judges every device seen in the window from the last time each hop
@@ -455,10 +617,18 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		window = d
 	}
 	now := time.Now()
+	// Last sightings from hop events, which may be sampled, and from
+	// counters, which cover all traffic but arrive every few seconds.
 	rows, err := s.db.Query(r.Context(), `
-		SELECT device, hop, max(ts) FROM hop_events
-		WHERE tenant = ? AND ts >= ?
-		GROUP BY device, hop`, s.rules.Tenant, now.Add(-window))
+		SELECT device, hop, max(t) FROM (
+			SELECT device, hop, max(ts) AS t FROM hop_events
+			WHERE tenant = ? AND ts >= ?
+			GROUP BY device, hop
+			UNION ALL
+			SELECT device, hop, toDateTime64(max(last_seen), 9) AS t FROM device_counters
+			WHERE tenant = ? AND bucket >= toStartOfFiveMinutes(?) AND last_seen >= ?
+			GROUP BY device, hop)
+		GROUP BY device, hop`, s.rules.Tenant, now.Add(-window), s.rules.Tenant, now.Add(-window), now.Add(-window))
 	if err != nil {
 		httpError(w, err)
 		return
@@ -495,6 +665,24 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		}
 		changed[d] = true
 	}
+	invalid := map[string]uint64{}
+	irows, err := s.db.Query(r.Context(), `
+		SELECT device, count() FROM hop_events
+		WHERE tenant = ? AND ts >= ? AND op = 'error'
+		GROUP BY device`, s.rules.Tenant, now.Add(-window))
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	for irows.Next() {
+		var d string
+		var n uint64
+		if err := irows.Scan(&d, &n); err != nil {
+			httpError(w, err)
+			return
+		}
+		invalid[d] = n
+	}
 
 	order := map[verdict.State]int{verdict.Stopped: 0, verdict.Silent: 1, verdict.Unsure: 2, verdict.Unknown: 3, verdict.OK: 4}
 	expected := map[string]bool{}
@@ -507,7 +695,25 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	hops := s.rules.Hops()
+	// Only watched devices have payloads, so only they can break a mapping.
+	wrong, watchedNow := map[string]int{}, map[string]bool{}
+	ws, err := s.activeWatches(r.Context(), "")
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	for _, wd := range ws {
+		watchedNow[wd.Device] = true
+		fs, err := s.findings(r.Context(), wd.Device, now.Add(-window))
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		for _, f := range fs {
+			wrong[wd.Device] += f.Broken
+		}
+	}
+	hops := s.rules.RequiredHops()
 	for device, seen := range last {
 		state, after := verdict.Quick(hops, seen, now, s.grace, s.grace+45*time.Second)
 		// A stop just before a hop the tap was not watching, or silence while it
@@ -530,7 +736,8 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 			state = verdict.Unsure
 		}
 		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, StoppedAt: s.serviceAfter(after), Rejected: state == verdict.Stopped && s.rejectedAfter(after, seen),
-			LastSeen: seen, Expected: expected[device], ShapeChanged: changed[device]})
+			LastSeen: seen, Expected: expected[device], ShapeChanged: changed[device], Invalid: invalid[device],
+			WrongValues: wrong[device], Watched: watchedNow[device]})
 	}
 
 	// Expected devices with nothing in the window: silent if ever seen, else never seen.
@@ -572,7 +779,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Device < out[j].Device
 	})
-	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "via": s.via(), "tap": blindList(blind), "window": window.String(), "expected": len(s.expected), "devices": out})
+	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "optional": s.optional(), "via": s.via(), "tap": blindList(blind), "window": window.String(), "expected": len(s.expected), "devices": out})
 }
 
 func (s *server) journey(w http.ResponseWriter, r *http.Request) {
@@ -582,30 +789,45 @@ func (s *server) journey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.db.Query(r.Context(), `
-		SELECT device, seq, hop, op, ts, bytes FROM hop_events
-		WHERE journey_id = ? ORDER BY ts`, id)
+		SELECT e.device, e.seq, e.hop, e.op, e.ts, e.bytes, e.reason, p.payload
+		FROM hop_events AS e
+		LEFT JOIN (SELECT hop, ts, payload FROM payload_samples WHERE journey_id = ?) AS p ON p.hop = e.hop AND p.ts = e.ts
+		WHERE e.journey_id = ? ORDER BY e.ts`, id, id)
 	if err != nil {
 		httpError(w, err)
 		return
 	}
 	type row struct {
-		Device string    `json:"device"`
-		Seq    uint64    `json:"seq"`
-		Hop    string    `json:"hop"`
-		Op     string    `json:"op"`
-		At     time.Time `json:"at"`
-		Bytes  uint32    `json:"bytes"`
+		Device  string    `json:"device"`
+		Seq     uint64    `json:"seq"`
+		Hop     string    `json:"hop"`
+		Op      string    `json:"op"`
+		At      time.Time `json:"at"`
+		Bytes   uint32    `json:"bytes"`
+		Reason  string    `json:"reason,omitempty"`
+		Payload string    `json:"payload,omitempty"` // watched devices only
 	}
 	out := []row{}
 	for rows.Next() {
 		var x row
-		if err := rows.Scan(&x.Device, &x.Seq, &x.Hop, &x.Op, &x.At, &x.Bytes); err != nil {
+		if err := rows.Scan(&x.Device, &x.Seq, &x.Hop, &x.Op, &x.At, &x.Bytes, &x.Reason, &x.Payload); err != nil {
 			httpError(w, err)
 			return
 		}
 		out = append(out, x)
 	}
 	writeJSON(w, map[string]any{"journey_id": id, "route": s.rules.Hops(), "via": s.via(), "hops": out})
+}
+
+// optional lists the route's optional hops.
+func (s *server) optional() []string {
+	out := []string{}
+	for _, st := range s.rules.Route {
+		if st.Optional {
+			out = append(out, st.Hop)
+		}
+	}
+	return out
 }
 
 // via maps each hop to the service that carries readings to it, where the

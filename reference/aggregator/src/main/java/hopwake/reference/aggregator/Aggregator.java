@@ -3,6 +3,7 @@ package hopwake.reference.aggregator;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import hopwake.windows.WindowRecord;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -23,13 +24,17 @@ import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.Suppressed;
 import org.apache.kafka.streams.kstream.TimeWindows;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.Record;
 
 /**
  * Per-site, per-minute aggregates of normalised telemetry.
  *
  * <p>Reads telemetry.normalized, groups readings by site into one-minute windows, and when a
  * window closes writes the median temperature and pressure, the number of readings and the number
- * of distinct devices to telemetry.site_minute, keyed by site.
+ * of distinct devices to telemetry.site_minute, keyed by site. Each output carries a Hopwake
+ * window record in a header, so the readings behind it can be found.
  */
 public final class Aggregator {
   static final ObjectMapper JSON = new ObjectMapper();
@@ -40,6 +45,12 @@ public final class Aggregator {
     public List<Double> pressuresPa = new ArrayList<>();
     public TreeSet<String> devices = new TreeSet<>();
   }
+
+  /** The Hopwake hop the aggregator reads from. */
+  static final String INPUT_HOP = "kafka:telemetry.normalized";
+
+  /** An output record and its window record header. */
+  record Out(String json, byte[] window) {}
 
   private Aggregator() {}
 
@@ -67,19 +78,39 @@ public final class Aggregator {
             Materialized.with(Serdes.String(), new JsonSerde<>(Window.class)))
         .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded()))
         .toStream()
-        .map((windowed, w) -> {
-          ObjectNode out = JSON.createObjectNode();
-          out.put("site", windowed.key());
-          out.put("window_start", Instant.ofEpochMilli(windowed.window().start()).toString());
-          out.put("window_end", Instant.ofEpochMilli(windowed.window().end()).toString());
-          out.put("readings", w.temperaturesK.size());
-          out.put("devices", w.devices.size());
-          out.put("median_temperature_k", round(median(w.temperaturesK), 2));
-          out.put("median_pressure_pa", Math.round(median(w.pressuresPa)));
-          return KeyValue.pair(windowed.key(), out.toString());
+        .map((windowed, w) -> KeyValue.pair(windowed.key(), output(windowed.key(), windowed.window().start(), windowed.window().end(), w)))
+        .process(() -> new Processor<String, Out, String, String>() {
+          private ProcessorContext<String, String> ctx;
+
+          @Override
+          public void init(ProcessorContext<String, String> context) {
+            ctx = context;
+          }
+
+          @Override
+          public void process(Record<String, Out> r) {
+            Record<String, String> out = new Record<>(r.key(), r.value().json(), r.timestamp());
+            out.headers().add(WindowRecord.HEADER, r.value().window());
+            ctx.forward(out);
+          }
         })
         .to(target, Produced.with(Serdes.String(), Serdes.String()));
     return builder.build();
+  }
+
+  static Out output(String site, long startMs, long endMs, Window w) {
+    Instant start = Instant.ofEpochMilli(startMs);
+    Instant end = Instant.ofEpochMilli(endMs);
+    ObjectNode out = JSON.createObjectNode();
+    out.put("site", site);
+    out.put("window_start", start.toString());
+    out.put("window_end", end.toString());
+    out.put("readings", w.temperaturesK.size());
+    out.put("devices", w.devices.size());
+    out.put("median_temperature_k", round(median(w.temperaturesK), 2));
+    out.put("median_pressure_pa", Math.round(median(w.pressuresPa)));
+    return new Out(out.toString(),
+        WindowRecord.header("median", site, start, end, INPUT_HOP, w.temperaturesK.size(), w.devices));
   }
 
   static double median(List<Double> values) {

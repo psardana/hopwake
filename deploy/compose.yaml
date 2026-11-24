@@ -44,9 +44,12 @@ services:
       TAP_RULES: /etc/hopwake/journey-rules.yaml
       TAP_MQTT: tcp://mosquitto:1883
       TAP_KAFKA: kafka:29092
+      TAP_CONTROL: http://journey:8090
+      TAP_SAMPLE: ${TAP_SAMPLE:-1}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
     volumes:
       - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
+      - ../reference/schemas:/etc/hopwake/schemas:ro
     depends_on:
       - collector
 
@@ -62,6 +65,7 @@ services:
       JOURNEY_FLEET: /etc/hopwake/fleet.txt
     volumes:
       - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
+      - ../reference/schemas:/etc/hopwake/schemas:ro
       - ../reference/fleet.txt:/etc/hopwake/fleet.txt:ro
     ports:
       - "8090:8090"

@@ -29,6 +29,8 @@ class Faults:
     FAULT_DROP drops a share of readings; FAULT_RENAME renames temp_c the way an
     unannounced firmware change would, which sends the reading to dead letters.
     FAULT_DEVICES limits both to a comma-separated list of devices.
+    FAULT_KELVIN_DEVICES lists devices whose temperature is converted with
+    272.65 instead of 273.15, a wrong conversion that nothing downstream notices.
     Each injected fault is logged as one JSON line.
     """
 
@@ -38,6 +40,8 @@ class Faults:
         self.drop = float(env.get("FAULT_DROP") or 0)
         self.rename = float(env.get("FAULT_RENAME") or 0)
         self.devices = {d.strip() for d in (env.get("FAULT_DEVICES") or "").split(",") if d.strip()}
+        self.kelvin_devices = {d.strip() for d in (env.get("FAULT_KELVIN_DEVICES") or "").split(",") if d.strip()}
+        self._kelvin_logged = set()
         if self.drop or self.rename:
             log.info("faults on: drop=%.3f rename=%.3f devices=%d (0 means all)", self.drop, self.rename, len(self.devices))
 
@@ -58,20 +62,33 @@ class Faults:
             raw["temperature"] = raw.pop("temp_c")
         return raw
 
+    def kelvin(self, raw: dict) -> float:
+        """The offset to convert this reading's temperature with."""
+        device = raw.get("device_id", "")
+        if device not in self.kelvin_devices:
+            return KELVIN
+        if device not in self._kelvin_logged:  # once per device, not per reading
+            self._kelvin_logged.add(device)
+            self._log("kelvin", raw)
+        return 272.65
+
     @staticmethod
     def _log(kind: str, raw: dict) -> None:
         log.info(json.dumps({"fault": kind, "hop": "normaliser", "device": raw.get("device_id"),
                              "seq": raw.get("seq"), "at": datetime.now(timezone.utc).isoformat()}))
 
 
-def normalise(raw: dict) -> dict:
+KELVIN = 273.15
+
+
+def normalise(raw: dict, kelvin: float = KELVIN) -> dict:
     return {
         "schema": "telemetry/v2",
         "device": raw["device_id"],
         "site": raw["site"],
         "seq": int(raw["seq"]),
         "observed_at": raw["ts"],
-        "temperature_k": round(float(raw["temp_c"]) + 273.15, 2),
+        "temperature_k": round(float(raw["temp_c"]) + kelvin, 2),
         "pressure_pa": int(round(float(raw["pressure_kpa"]) * 1000)),
         "vibration_mm_s": float(raw["vibration_mm_s"]),
     }
@@ -130,13 +147,18 @@ def main() -> None:
                 attributes={"messaging.system": "kafka", "messaging.destination.name": SOURCE, "device.id": device},
             ) as span:
                 try:
-                    raw = faults.apply(json.loads(msg.value()))
+                    parsed = json.loads(msg.value())
+                    if isinstance(parsed, dict) and "seq" in parsed:
+                        # Lets Hopwake place this span on the reading's journey.
+                        span.set_attribute("reading.seq", int(parsed["seq"]))
+                    raw = faults.apply(parsed)
                     if raw is None:
                         counts["dropped"] += 1
                         continue
-                    out = normalise(raw)
+                    out = normalise(raw, kelvin=faults.kelvin(raw))
                 except (ValueError, KeyError, TypeError, AttributeError) as exc:
                     span.record_exception(exc)
+                    span.set_status(tracing.Status(tracing.StatusCode.ERROR, reason(exc)))
                     producer.produce(DLQ, key=msg.key(), value=msg.value(),
                                      headers=tracing.inject(headers) + [("dlq_reason", reason(exc).encode()), ("dlq_at", now())])
                     counts["dlq"] += 1

@@ -19,6 +19,7 @@ type faults struct {
 	duplicate float64
 	delayRate float64
 	delay     time.Duration
+	from      time.Time // faults apply from this time on
 }
 
 func faultsFromEnv() faults {
@@ -30,6 +31,12 @@ func faultsFromEnv() faults {
 	}
 	if d, err := time.ParseDuration(os.Getenv("FAULT_DELAY")); err == nil {
 		f.delay = d
+	}
+	// FAULT_AFTER holds faults back for a while after start, so a demo can
+	// show a device that worked and then stopped.
+	f.from = time.Now()
+	if d, err := time.ParseDuration(os.Getenv("FAULT_AFTER")); err == nil {
+		f.from = f.from.Add(d)
 	}
 	for _, d := range strings.Split(os.Getenv("FAULT_DEVICES"), ",") {
 		if d = strings.TrimSpace(d); d != "" {
@@ -48,7 +55,7 @@ func (f faults) active() bool {
 }
 
 func (f faults) applies(device string) bool {
-	return f.active() && (len(f.devices) == 0 || f.devices[device])
+	return f.active() && !time.Now().Before(f.from) && (len(f.devices) == 0 || f.devices[device])
 }
 
 // decide returns what to do with one message: drop it, send it this many times,

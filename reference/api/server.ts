@@ -3,10 +3,17 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
+import { Hook } from './hopwake-hook.ts';
 
 const port = Number(process.env.API_PORT ?? 8080);
 const pool = new pg.Pool({ connectionString: process.env.API_DB ?? 'postgres://hopwake:hopwake@localhost:5432/reference' });
 const portalDir = path.join(import.meta.dirname, 'portal');
+
+// Hopwake cannot see an HTTP response from outside, so the API says itself
+// which readings it served, when HOPWAKE_OTLP_ENDPOINT is set.
+const served = process.env.HOPWAKE_OTLP_ENDPOINT
+  ? new Hook({ tenant: process.env.HOPWAKE_TENANT ?? 'reference', hop: 'hook:api.served', service: 'api' })
+  : null;
 
 type Handler = (params: Record<string, string>, query: URLSearchParams) => Promise<unknown>;
 
@@ -32,11 +39,15 @@ const routes: Array<[RegExp, Handler]> = [
     FROM readings WHERE site = $1 GROUP BY device ORDER BY device`, [p.site])).rows],
 
   // Latest readings of one device, newest first.
-  [/^\/api\/devices\/(?<device>[\w.-]+)\/readings$/, async (p, q) => (await pool.query(`
-    SELECT seq::int AS seq, site, observed_at, stored_at,
-           round((temperature_k - 273.15)::numeric, 2)::float AS temperature_c,
-           pressure_pa, vibration_mm_s
-    FROM readings WHERE device = $1 ORDER BY observed_at DESC LIMIT $2`, [p.device, limit(q, 50, 1000)])).rows],
+  [/^\/api\/devices\/(?<device>[\w.-]+)\/readings$/, async (p, q) => {
+    const rows = (await pool.query(`
+      SELECT seq::int AS seq, site, observed_at, stored_at,
+             round((temperature_k - 273.15)::numeric, 2)::float AS temperature_c,
+             pressure_pa, vibration_mm_s
+      FROM readings WHERE device = $1 ORDER BY observed_at DESC LIMIT $2`, [p.device, limit(q, 50, 1000)])).rows;
+    for (const r of rows) served?.mark('serve', p.device, r.seq);
+    return rows;
+  }],
 ];
 
 function limit(q: URLSearchParams, fallback: number, max: number): number {

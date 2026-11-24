@@ -33,6 +33,7 @@ const (
 	AttrShapeFP     = "hopwake.schema.fp"
 	AttrShapeFields = "hopwake.shape.fields"
 	AttrReason      = "hopwake.reason"
+	AttrPayload     = "hopwake.payload"
 
 	// SchemaVersion hop/v1 adds the shape attributes to hop/v0.
 	SchemaVersion = "hop/v1"
@@ -78,6 +79,7 @@ type Event struct {
 	ShapeFP     string // fingerprint of the payload's shape at this hop
 	ShapeFields string // the shape's fields, sent with the first event of a new shape only
 	Reason      string // why a reading was rejected or failed (op drop or error)
+	Payload     string // the redacted payload, for watched devices only
 }
 
 // Validate reports what is wrong with an event, if anything.
@@ -135,6 +137,9 @@ func (r *Recorder) Record(ctx context.Context, e Event) error {
 	}
 	if e.Reason != "" {
 		span.SetAttributes(attribute.String(AttrReason, e.Reason))
+	}
+	if e.Payload != "" {
+		span.SetAttributes(attribute.String(AttrPayload, e.Payload))
 	}
 	span.End(trace.WithTimestamp(at))
 	return nil

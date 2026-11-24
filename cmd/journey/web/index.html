@@ -70,7 +70,9 @@
   .grow { display: grid; align-items: center; height: 30px; border-top: 1px solid var(--line2); }
   .grow.head { height: 28px; color: var(--quiet); font-size: 11px; border-top-color: var(--line); }
   .grow.pick { cursor: pointer; }
-  .grow.pick:hover { background: var(--line2); }
+  .grow.pick:hover, .grow.pick.on { background: var(--line2); }
+  pre.payload { margin: 4px 0 0; padding: 8px; border-radius: 6px; background: var(--side); font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+  .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
   .cell { width: 9px; height: 9px; border-radius: 50%; margin: auto; }
   .cell.rej { width: auto; height: auto; border-radius: 0; color: var(--warn); font-weight: 600; line-height: 1; }
   .split { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
@@ -98,6 +100,12 @@
     <a class="navlink" id="navFleet" href="#/">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       Fleet <span class="n" id="fleetCount"></span></a>
+    <a class="navlink" id="navMappings" href="#/mappings">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 6H13a3 3 0 0 1 3 3v6.5"/></svg>
+      Mappings</a>
+    <a class="navlink" id="navAggregates" href="#/aggregates">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 6h4M4 12h4M4 18h4M8 6l6 6M8 18l6-6M14 12h6"/></svg>
+      Aggregates</a>
     <div class="sidehead"><span>Needs attention</span><span id="attnCount"></span></div>
     <div id="attention"></div>
     <div class="sidehead"><span>Recent</span></div>
@@ -130,7 +138,8 @@ const ms = ns => ns >= 1e9 ? `${(ns / 1e9).toFixed(1)} s` : `${Math.round(ns / 1
 const hopKind = h => h.split(':')[0];
 const hopWhere = h => h.slice(h.indexOf(':') + 1);
 const hopShort = h => { const w = hopWhere(h); return hopKind(h) === 'mqtt' ? 'MQTT' : w.split('.').pop(); };
-let fleet = null, current = null, selHop = null, timer = null;
+let fleet = null, current = null, selHop = null, timer = null, selJourney = null;
+const journeyCache = {};
 
 // Theme: follows the system; a manual choice is remembered in this browser.
 function applyTheme(t) { document.documentElement.dataset.theme = t; }
@@ -187,6 +196,8 @@ async function loadFleet() {
 
 function renderFleet() {
   $('navFleet').classList.add('on');
+  $('navMappings').classList.remove('on');
+  $('navAggregates').classList.remove('on');
   const devs = fleet.devices, route = fleet.route;
   const n = s => devs.filter(d => d.state === s).length;
   const never = devs.filter(d => d.state === 'unknown' && d.expected).length;
@@ -196,10 +207,10 @@ function renderFleet() {
   $('view').innerHTML = `
     <div><h1>Fleet</h1><p class="quiet" style="margin:6px 0 0">${intro}, judged against the route ${route.map(h => `<span class="mono">${esc(hopShort(h))}</span>`).join(' → ')}.</p></div>
     ${(fleet.tap || []).length ? `<p class="quiet" style="margin:0">${esc(tapSummary(fleet.tap, route))} Verdicts that depend on ${fleet.tap.length > 1 ? 'those hops' : 'that hop'} wait until it catches up.</p>` : ''}
-    <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${n('unsure') ? `<span class="chip">${n('unsure')} waiting for the tap</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
+    <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${devs.some(d => d.invalid) ? `<span class="chip bad">${devs.filter(d => d.invalid).length} breaking a schema</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${n('unsure') ? `<span class="chip">${n('unsure')} waiting for the tap</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
     <section class="panel" style="overflow-x:auto" aria-label="Devices">
       ${devs.length ? `<table><thead><tr><th>Device</th><th>State</th>${route.map(h => `<th>Last seen at ${esc(hopShort(h))}</th>`).join('')}</tr></thead><tbody>
-      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at, d.rejected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
+      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at, d.rejected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}${d.invalid ? ' <span class="chip bad">Breaks schema</span>' : ''}${d.wrong_values ? ' <span class="chip bad">Wrong values</span>' : ''}${d.watched ? ' <span class="chip" title="payloads captured at every hop">Watched</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
       </tbody></table>` : '<div class="empty">No hop events in this window yet. Is the tap running?</div>'}
     </section>`;
   for (const tr of document.querySelectorAll('tbody tr')) tr.onclick = () => location.hash = `#/device/${encodeURIComponent(tr.dataset.d)}`;
@@ -207,11 +218,15 @@ function renderFleet() {
 
 async function renderDevice(device) {
   $('navFleet').classList.remove('on');
+  $('navMappings').classList.remove('on');
+  $('navAggregates').classList.remove('on');
   const d = await get(`/api/devices/${encodeURIComponent(device)}?window=${win()}`);
-  if (current !== device) { selHop = null; current = device; remember(device); }
+  if (current !== device) { selHop = null; selJourney = null; current = device; remember(device); }
+  if (selJourney) { try { journeyCache[selJourney] = await get(`/api/journeys/${selJourney}`); } catch { selJourney = null; } }
   const v = d.verdict, route = d.route, last = route.length - 1;
   const settled = d.journeys.find(j => Date.now() - new Date(j.first) >= 15000);
   const reached = settled ? settled.reached : -1;
+  const optional = new Set(d.optional || []);
   const stopIdx = v.state === 'stopped' && v.stopped_after ? route.indexOf(v.stopped_after) : -1;
   if (selHop === null) selHop = stopIdx >= 0 ? stopIdx : last;
   const stat = Object.fromEntries((d.hops || []).map(h => [h.hop, h]));
@@ -233,18 +248,21 @@ async function renderDevice(device) {
   const changeText = c => [c.removed && c.removed.length ? `${listFields(c.removed)} removed` : '', c.added && c.added.length ? `${listFields(c.added)} added` : '', c.retyped && c.retyped.length ? `${listFields(c.retyped)} changed type` : ''].filter(Boolean).join(', ');
   // A shape change at or before the stop, within 30 s of it, is the likely cause.
   const cause = v.state === 'stopped' && v.since ? route.slice(0, stopIdx + 1).map(h => shapeBy[h]).filter(x => x && x.change && Math.abs(new Date(x.current.first) - new Date(v.since)) <= 30000)[0] : null;
-  const fullSentence = cause ? `${sentence} At the same moment its payload changed at ${hopShort(cause.hop)}: ${changeText(cause.change)}.` : sentence;
+  const broken = (d.hops || []).filter(x => x.invalid > 0).sort((a, b) => route.indexOf(a.hop) - route.indexOf(b.hop))[0];
+  const schemaText = broken ? ` ${broken.invalid} readings broke the declared schema at ${hopShort(broken.hop)}: ${broken.invalid_reason}.` : '';
+  const fullSentence = (cause ? `${sentence} At the same moment its payload changed at ${hopShort(cause.hop)}: ${changeText(cause.change)}.` : sentence) + schemaText;
 
   const hopsHtml = route.map((h, i) => {
-    const isStop = i === stopIdx, done = reached >= i;
+    const isStop = i === stopIdx, done = reached >= i || (optional.has(h) && !!stat[h] && reached >= i - 1);
     const fill = isStop ? 'var(--warn-dot)' : done ? 'var(--dot)' : 'transparent';
     const ring = isStop ? 'var(--warn-dot)' : done ? 'var(--dot)' : 'var(--off)';
-    const meta = isStop ? 'last hop reached' : stat[h] ? `${stat[h].count} · ${ago(stat[h].last_seen)}` : 'not seen';
+    const meta = isStop ? 'last hop reached' : stat[h] ? `${stat[h].count} · ${ago(stat[h].last_seen)}` : optional.has(h) ? 'on demand, not yet' : 'not seen';
     return `<button type="button" class="hop ${i === selHop ? 'sel' : ''}" data-i="${i}">
       <span class="line"><span class="ring" style="background:${fill};box-shadow:inset 0 0 0 1.5px ${ring}${isStop ? ',0 0 0 3px var(--warn-bg)' : ''}"></span>${i < last ? (() => { const bar = `<span class="bar" style="background:${reached > i && !(isStop) ? 'var(--dot)' : 'var(--off)'}"></span>`; const via = (d.via || {})[route[i + 1]]; return via ? `${bar}<span class="via ${isStop ? 'bad' : ''}" title="service between ${esc(hopShort(h))} and ${esc(hopShort(route[i + 1]))}">${esc(via)}</span>${bar}` : bar; })() : ''}</span>
       <div class="k" style="color:${i > reached && !isStop && reached >= 0 ? 'var(--quiet)' : 'var(--ink)'}">${esc(hopShort(h))}</div>
       <div class="m mono" title="${esc(h)}">${esc(hopKind(h))} · ${esc(meta)}</div>
       ${shapeBy[h] ? `<div class="m mono" title="shape ${esc(shapeBy[h].current.fingerprint)}">shape ${esc(shapeBy[h].current.fingerprint.slice(0, 6))} · ${(shapeBy[h].current.fields || []).length} fields</div>` : ''}
+      ${stat[h] && stat[h].invalid ? `<div class="m" style="color:var(--warn)">${stat[h].invalid} break the schema</div>` : ''}
       ${shapeBy[h] && shapeBy[h].change ? `<div class="m" style="color:var(--warn)">shape changed ${time(shapeBy[h].current.first)}</div>` : ''}</button>`;
   }).join('');
 
@@ -252,11 +270,12 @@ async function renderDevice(device) {
   const rows = d.journeys.slice(0, 14).map(j => {
     const at = new Set(j.hops.map(h => h.hop));
     const young = Date.now() - new Date(j.first) < 15000;
-    return `<div class="grow pick" style="grid-template-columns:${cols}" data-j="${esc(j.journey_id)}" title="journey ${esc(j.journey_id)}">
+    return `<div class="grow pick${j.journey_id === selJourney ? ' on' : ''}" style="grid-template-columns:${cols}" data-j="${esc(j.journey_id)}" title="journey ${esc(j.journey_id)}">
       <span class="mono" style="padding-left:14px">${j.seq}</span><span class="mono quiet">${time(j.first)}</span>
       ${route.map((h, i) => {
         const hit = at.has(h);
-        const missing = !hit && !young && i === j.reached + 1;
+        const missing = !hit && !young && i === j.reached + 1 && !optional.has(h);
+        if (hit && j.invalid && j.invalid[h]) return `<span class="cell" title="broke the declared schema: ${esc(j.invalid[h])}" style="background:var(--warn-dot);box-shadow:inset 0 0 0 1.5px var(--warn-dot)"></span>`;
         if (missing && j.rejected) return `<span class="cell rej" title="rejected: ${esc(j.rejected)}">×</span>`;
         return `<span class="cell" style="background:${hit ? 'var(--dot)' : 'transparent'};box-shadow:inset 0 0 0 1.5px ${hit ? 'var(--dot)' : missing ? 'var(--warn-dot)' : 'var(--off)'}"></span>`;
       }).join('')}</div>`;
@@ -271,9 +290,14 @@ async function renderDevice(device) {
       <div style="flex:1 1 400px">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after, (fleet.devices.find(x => x.device === d.device) || {}).expected, v.stopped_at, v.rejected > 0)}</div>
         <p style="margin:6px 0 0;color:${bad ? 'var(--ink)' : 'var(--quiet)'}">${esc(fullSentence)}</p>
+        ${(d.findings || []).map(f => `<p style="margin:6px 0 0"><span class="chip bad" style="margin-right:6px">Wrong values</span>${esc(findingText(d.device, f))}</p>`).join('')}
       </div>
-      <button class="btn" type="button" id="copyLink">Copy link</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn" type="button" id="watchBtn" title="${d.watch ? 'Stop capturing payloads' : 'Capture full payloads at every hop for one hour; kept 24 hours'}">${d.watch ? 'Stop watching' : 'Watch for 1 hour'}</button>
+        <button class="btn" type="button" id="copyLink">Copy link</button>
+      </div>
     </div>
+    ${d.watch ? `<p class="quiet" style="margin:-8px 0 0">Watching since ${time(d.watch.since)} until ${time(d.watch.until)}: full payloads at every hop, redacted in the tap and kept 24 hours. Pick a reading to see them.</p>` : ''}
     <section aria-label="Route">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--quiet);font-size:12px;font-weight:500;margin-bottom:8px">
         <span>Route · ${route.length} hops</span>
@@ -287,23 +311,138 @@ async function renderDevice(device) {
         <div class="grow head" style="grid-template-columns:${cols}"><span style="padding-left:14px">Seq</span><span>Sent</span>${route.map(h => `<span style="text-align:center">${esc(hopShort(h))}</span>`).join('')}</div>
         ${rows || '<div class="empty">No readings in this window.</div>'}
       </section>
-      <aside class="panel" style="flex:1 1 280px;padding:16px;display:flex;flex-direction:column;gap:14px" aria-label="Hop detail">
+      ${selJourney && journeyCache[selJourney] ? readingPanel(journeyCache[selJourney], route) : `<aside class="panel" style="flex:1 1 280px;padding:16px;display:flex;flex-direction:column;gap:14px" aria-label="Hop detail">
         <div><div class="quiet" style="font-size:11px;font-weight:500">Selected hop</div>
           <div style="font-weight:600;font-size:15px;margin-top:2px">${esc(hopShort(h))}</div>
           <div class="mono quiet" style="word-break:break-all">${esc(h)}</div></div>
         <dl>
           <dt>Readings seen</dt><dd>${s ? s.count : 0}</dd>
+          ${s && s.counted ? `<dt>Counted, all traffic</dt><dd title="hop events are sampled; counters cover every message, in five-minute buckets">${s.counted}</dd>` : ''}
           <dt>Last seen</dt><dd>${s ? time(s.last_seen) : '—'}</dd>
           <dt>Readings that got here</dt><dd style="color:${total && reachedHere < total ? 'var(--warn)' : 'inherit'}">${total ? `${reachedHere} of ${total}` : '—'}</dd>
           ${selHop === stopIdx && v.missing ? `<dt>Missing after it</dt><dd style="color:var(--warn)">${v.missing} since ${time(v.since)}</dd>` : ''}
+          ${s && s.invalid ? `<dt>Broke the declared schema</dt><dd style="color:var(--warn)">${s.invalid}</dd><dt>Latest reason</dt><dd class="mono" style="color:var(--warn)">${esc(s.invalid_reason)}</dd>` : ''}
           ${selHop === stopIdx && v.rejected ? `<dt>Rejected by the ${esc(v.stopped_at || 'next service')}</dt><dd style="color:var(--warn)">${v.rejected}</dd><dt>Reason</dt><dd class="mono" style="color:var(--warn)">${esc(v.reason)}</dd>` : ''}
         </dl>
         ${shapePanel(shapeBy[h])}
         ${selHop === stopIdx && v.not_reached ? `<div class="quiet" style="border-top:1px solid var(--line2);padding-top:12px">Readings reach <span class="mono">${esc(hopShort(h))}</span> and never arrive at <span class="mono">${esc(hopShort(v.not_reached))}</span>. ${v.stopped_at ? `The ${esc(v.stopped_at)} carries them between those two hops: look there first.` : 'Whatever sits between those two hops is where to look.'}</div>` : ''}
-      </aside>
-    </div>`;
-  for (const b of document.querySelectorAll('.hop')) b.onclick = () => { selHop = Number(b.dataset.i); renderDevice(device); };
+      </aside>`}
+    </div>
+    ${aggregatesPanel(d)}`;
+  for (const b of document.querySelectorAll('.hop')) b.onclick = () => { selHop = Number(b.dataset.i); selJourney = null; renderDevice(device); };
+  for (const r of document.querySelectorAll('.grow.pick')) r.onclick = () => { selJourney = selJourney === r.dataset.j ? null : r.dataset.j; renderDevice(device); };
+  if ($('closeReading')) $('closeReading').onclick = () => { selJourney = null; renderDevice(device); };
+  $('watchBtn').onclick = async () => {
+    $('watchBtn').disabled = true;
+    try { await fetch(`/api/devices/${encodeURIComponent(device)}/watch`, { method: d.watch ? 'DELETE' : 'POST' }); } catch {}
+    renderDevice(device);
+  };
   $('copyLink').onclick = async () => { try { await navigator.clipboard.writeText(location.href); $('copyLink').textContent = 'Copied'; } catch {} };
+}
+
+// A confirmed mapping the device's readings broke, in one sentence.
+function findingText(device, f) {
+  const e = f.example, who = f.via ? `The ${f.via}` : `The service before ${hopShort(f.to)}`;
+  const src = e.expr.split(/\s/)[0];
+  return `${who} turned ${src} ${e.in} into ${e.field} ${e.got} for ${device} (seq ${f.seq}, ${time(f.last)}); the confirmed mapping ${e.field} = ${e.expr} expects ${e.want}. ${f.broken} of ${f.checked} watched readings since ${time(f.first)}.`;
+}
+
+async function renderMappings() {
+  current = null;
+  $('navFleet').classList.remove('on');
+  $('navAggregates').classList.remove('on');
+  $('navMappings').classList.add('on');
+  const m = await get('/api/mappings');
+  const statusChip = r => r.status === 'confirmed' && r.partial ? `<span class="chip bad"><span class="dot bad"></span>Confirmed, broken by ${esc((r.outliers || []).join(', '))}</span>`
+    : r.status === 'confirmed' ? '<span class="chip"><span class="dot"></span>Confirmed</span>'
+    : r.status === 'differs' ? `<span class="chip bad" title="confirmed: ${esc(r.confirmed)}"><span class="dot bad"></span>Differs from ${esc(r.confirmed)}</span>`
+    : '<span class="chip shape">Not confirmed</span>';
+  $('view').innerHTML = `
+    <div><h1>Mappings</h1><p class="quiet" style="margin:6px 0 0">How each service maps fields from one hop to the next, worked out from the same readings seen on both sides. Only watched devices give paired readings; a proposal needs ${m.min_pairs} of them, 95% agreeing. Confirm one by adding it to the route step in the rules file, where it is reviewed like code; Hopwake then checks every watched reading against it.</p></div>
+    ${m.edges.map((e, i) => `<section class="panel" style="padding:16px;display:flex;flex-direction:column;gap:12px" aria-label="Edge ${i + 1}">
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap">
+        <span style="font-weight:600"><span class="mono">${esc(hopShort(e.from))}</span> → <span class="mono">${esc(hopShort(e.to))}</span>${e.via ? ` <span class="quiet" style="font-weight:400">via ${esc(e.via)}</span>` : ''}</span>
+        <span class="quiet">${e.pairs} paired readings from ${e.devices} watched ${e.devices === 1 ? 'device' : 'devices'}, last 24 hours</span>
+      </div>
+      ${e.relations.length ? `<table><thead><tr><th>Output field</th><th>Follows from</th><th>Kind</th><th>Fit</th><th>Status</th></tr></thead><tbody>
+        ${e.relations.map(r => `<tr style="cursor:default"><td class="mono">${esc(r.out)}</td><td class="mono">${esc(r.expr)}</td><td class="quiet">${esc(r.kind)}</td><td class="quiet" style="${r.partial ? 'color:var(--warn)' : ''}">${Math.round(r.agree * 100)}%${r.partial && r.outliers ? `, not ${esc(r.outliers.join(', '))}` : ''}</td><td>${statusChip(r)}</td></tr>`).join('')}
+      </tbody></table>` : `<div class="empty">${/^(hook|span):/.test(e.to) ? `No payloads at ${esc(hopShort(e.to))}: ${esc(e.via || 'the service')} marks readings there without them, so there is nothing to map.` : e.pairs < m.min_pairs ? `${e.pairs} of ${m.min_pairs} paired readings so far. Watch a device to collect more.` : 'No field follows from the input consistently.'}</div>`}
+      ${e.new.length ? `<div class="quiet">New at ${esc(hopShort(e.to))}: <span class="mono">${e.new.map(esc).join(', ')}</span></div>` : ''}
+      ${e.dropped.length ? `<div class="quiet">Not carried on from ${esc(hopShort(e.from))}: <span class="mono">${e.dropped.map(esc).join(', ')}</span></div>` : ''}
+      ${e.unseen ? `<div class="quiet">Confirmed but not seen in the readings: <span class="mono">${Object.entries(e.unseen).map(([f, x]) => esc(`${f} = ${x}`)).join(', ')}</span></div>` : ''}
+      ${e.relations.length ? `<div><div class="quiet" style="font-size:12px;margin-bottom:4px">As it would go on the route step for ${esc(hopShort(e.to))}</div><pre class="payload">${esc(e.yaml)}</pre></div>` : ''}
+    </section>`).join('')}`;
+}
+
+const windowName = w => `${w.key} ${w.op}, ${time(w.start)}`;
+let selWindow = null;
+
+async function renderAggregates() {
+  current = null;
+  for (const id of ['navFleet', 'navMappings']) $(id).classList.remove('on');
+  $('navAggregates').classList.add('on');
+  const m = location.hash.match(/^#\/aggregates\/([^/]+)\/(\d+)$/);
+  selWindow = m ? { key: decodeURIComponent(m[1]), start: m[2] } : null;
+  const list = (await get(`/api/windows?window=${win()}`)).windows;
+  const detail = selWindow ? await get(`/api/windows/${encodeURIComponent(selWindow.key)}/${selWindow.start}`).catch(() => null) : null;
+  const val = w => { try { const o = JSON.parse(w.output); return o.median_temperature_k !== undefined ? `${o.median_temperature_k} K · ${o.median_pressure_pa} Pa` : ''; } catch { return ''; } };
+  $('view').innerHTML = `
+    <div><h1>Aggregates</h1><p class="quiet" style="margin:6px 0 0">Each output stands for many readings. The job that made it says which devices went in; a device that fed the key's earlier windows but not this one is missing.</p></div>
+    <div class="split">
+      <section class="panel" style="flex:999 1 520px;min-width:0;overflow-x:auto" aria-label="Outputs">
+        ${list.length ? `<table><thead><tr><th>Output</th><th>Value</th><th>Readings</th><th>Devices</th><th>Missing</th></tr></thead><tbody>
+        ${list.map(w => { const id = `${encodeURIComponent(w.key)}/${new Date(w.start).getTime()}`; return `<tr data-w="${id}" style="${selWindow && `${encodeURIComponent(selWindow.key)}/${selWindow.start}` === id ? 'background:var(--line2)' : ''}"><td>${esc(windowName(w))}</td><td class="mono quiet">${esc(val(w))}</td><td>${w.inputs}</td><td>${w.device_count}</td><td>${w.missing.length ? `<span class="chip bad">${w.missing.length === 1 ? esc(w.missing[0]) : `${w.missing.length} devices`}</span>` : '<span class="quiet">—</span>'}</td></tr>`; }).join('')}
+        </tbody></table>` : '<div class="empty">No aggregated outputs in this window yet. Windows close a minute after they start.</div>'}
+      </section>
+      ${detail ? windowPanel(detail) : ''}
+    </div>`;
+  for (const tr of document.querySelectorAll('tr[data-w]')) tr.onclick = () => location.hash = `#/aggregates/${tr.dataset.w}`;
+}
+
+function windowPanel(d) {
+  const w = d.window;
+  return `<aside class="panel" style="flex:1 1 280px;padding:16px;display:flex;flex-direction:column;gap:12px;min-width:0" aria-label="Output">
+    <div><div class="quiet" style="font-size:11px;font-weight:500">Selected output</div>
+      <div style="font-weight:600;font-size:15px;margin-top:2px">${esc(windowName(w))}</div>
+      <div class="mono quiet">${esc(hopShort(w.hop))} · window ${time(w.start)}–${time(w.end)}</div></div>
+    <p style="margin:0">${w.inputs} readings from ${w.device_count} devices${w.missing.length ? `; missing: <span class="mono">${w.missing.map(esc).join(', ')}</span>` : ''}.</p>
+    <dl><dt>Hopwake saw at ${esc(hopShort(w.input_hop))}</dt><dd style="color:${d.seen < w.inputs ? 'var(--warn)' : 'inherit'}">${d.seen} of ${w.inputs}</dd></dl>
+    ${d.missing.length ? `<div style="border-top:1px solid var(--line2);padding-top:10px;display:flex;flex-direction:column;gap:6px"><span style="font-weight:500">Missing devices</span>
+      ${d.missing.map(a => `<a class="mono" href="#/device/${encodeURIComponent(a.device)}" style="color:var(--warn)">${esc(a.device)}</a><span class="quiet" style="margin-top:-4px">${a.furthest ? `got as far as ${esc(hopShort(a.furthest))} in this window` : 'not seen at any hop in this window'}</span>`).join('')}</div>` : ''}
+    <div style="border-top:1px solid var(--line2);padding-top:10px"><span style="font-weight:500">Inputs by device</span>
+      <div class="fields" style="margin-top:6px">${d.inputs.map(x => `<span class="same">${esc(x.device)} · ${x.readings}</span>`).join('') || '<span class="quiet">listed only up to 256 devices</span>'}</div></div>
+  </aside>`;
+}
+
+// One reading at every hop it reached, with its payload where it was captured.
+function readingPanel(j, route) {
+  const hops = j.hops || [];
+  const first = hops[0];
+  const order = h => { const i = route.indexOf(h); return i < 0 ? 98 : i; };
+  const sorted = [...hops].sort((a, b) => order(a.hop) - order(b.hop) || new Date(a.at) - new Date(b.at));
+  const pretty = p => { try { return JSON.stringify(JSON.parse(p), null, 1); } catch { return p; } };
+  return `<aside class="panel" style="flex:1 1 280px;padding:16px;display:flex;flex-direction:column;gap:14px;min-width:0" aria-label="Reading">
+    <div style="display:flex;justify-content:space-between;gap:8px"><div><div class="quiet" style="font-size:11px;font-weight:500">Selected reading</div>
+      <div style="font-weight:600;font-size:15px;margin-top:2px">seq ${first ? first.seq : '—'}</div>
+      <div class="mono quiet" style="word-break:break-all">${esc(j.journey_id)}</div></div>
+      <button class="linkish" type="button" id="closeReading">Back to hop</button></div>
+    ${sorted.map(x => `<div style="border-top:1px solid var(--line2);padding-top:10px">
+      <div style="display:flex;justify-content:space-between;gap:8px"><span style="font-weight:500">${esc(hopShort(x.hop))}</span><span class="mono quiet">${time(x.at)}${first ? ` · +${Math.max(0, new Date(x.at) - new Date(first.at))} ms` : ''}</span></div>
+      ${x.op !== 'receive' ? `<div class="mono" style="color:var(--warn)">${esc(x.op === 'drop' ? 'rejected' : x.op === 'error' ? 'broke the schema' : x.op)}${x.reason ? `: ${esc(x.reason)}` : ''}</div>` : ''}
+      ${x.payload ? `<pre class="payload">${esc(pretty(x.payload))}</pre>` : `<div class="quiet" style="font-size:12px">${x.bytes} bytes; payload not captured</div>`}
+    </div>`).join('')}
+  </aside>`;
+}
+
+function aggregatesPanel(d) {
+  const a = d.aggregates || { fed: [], missing: [] };
+  if (!a.fed.length && !a.missing.length) return '';
+  const link = w => `#/aggregates/${encodeURIComponent(w.key)}/${new Date(w.start).getTime()}`;
+  return `<section class="panel" style="padding:14px;display:flex;flex-direction:column;gap:8px" aria-label="Aggregates">
+    <div style="font-weight:500">Aggregates</div>
+    ${a.missing.length ? `<p style="margin:0;color:var(--warn)">Missing from ${a.missing.length} ${esc(a.missing[0].key)} ${esc(a.missing[0].op)} ${a.missing.length === 1 ? 'output' : 'outputs'} since ${time(a.missing[a.missing.length - 1].start)}: ${a.missing.slice(0, 4).map(w => `<a href="${link(w)}">${time(w.start)}</a>`).join(', ')}${a.missing.length > 4 ? ', …' : ''}.</p>` : ''}
+    ${a.fed.length ? `<p class="quiet" style="margin:0">Fed ${a.fed.slice(0, 5).map(w => `<a href="${link(w)}">${esc(windowName(w))}</a> (${w.inputs} readings, ${w.device_count} devices)`).join(', ')}.</p>` : ''}
+  </section>`;
 }
 
 function shapePanel(x) {
@@ -327,7 +466,10 @@ async function route() {
   const m = location.hash.match(/^#\/device\/(.+)$/);
   try {
     await loadFleet();
-    if (m) await renderDevice(decodeURIComponent(m[1])); else { current = null; renderFleet(); }
+    if (m) await renderDevice(decodeURIComponent(m[1]));
+    else if (location.hash === '#/mappings') await renderMappings();
+    else if (location.hash.startsWith('#/aggregates')) await renderAggregates();
+    else { current = null; renderFleet(); }
   } catch (e) { $('view').innerHTML = `<div class="err">${esc(e.message)}</div>`; }
   timer = setTimeout(route, 5000);
 }

@@ -1,0 +1,1 @@
+../../pkg/hook/node/hopwake-hook.ts

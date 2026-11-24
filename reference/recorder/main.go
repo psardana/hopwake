@@ -22,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/psardana/hopwake/pkg/hook"
 	"github.com/psardana/hopwake/reference/telemetry"
 )
 
@@ -83,6 +84,22 @@ func main() {
 	defer shutdown(context.Background())
 	tracer := telemetry.Tracer("hopwake/reference/recorder")
 
+	// Hopwake cannot see a database write from outside, so the recorder says
+	// itself which readings it stored, when HOPWAKE_OTLP_ENDPOINT is set.
+	var stores *hook.Hook
+	if os.Getenv("HOPWAKE_OTLP_ENDPOINT") != "" {
+		stores, err = hook.New(ctx, hook.Config{Tenant: env("HOPWAKE_TENANT", "reference"), Hop: "hook:recorder.stored", Service: "recorder"})
+		if err != nil {
+			log.Fatalf("hopwake hook: %v", err)
+		}
+		defer stores.Close(context.Background())
+		log.Printf("marking stored readings for Hopwake")
+	}
+	type key struct {
+		device string
+		seq    uint64
+	}
+
 	var stored, minutes, skipped int
 	report := time.Now()
 	for ctx.Err() == nil {
@@ -94,6 +111,7 @@ func main() {
 
 		batch := &pgx.Batch{}
 		var spans []trace.Span
+		var written []key
 		fetches.EachRecord(func(r *kgo.Record) {
 			// One span per record, continuing the trace the record carries.
 			_, span := tracer.Start(telemetry.Extract(context.Background(), r), "store "+r.Topic,
@@ -114,6 +132,7 @@ func main() {
 				batch.Queue(`INSERT INTO readings (device, site, seq, observed_at, temperature_k, pressure_pa, vibration_mm_s)
 					VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT DO NOTHING`,
 					v.Device, v.Site, v.Seq, v.ObservedAt, v.TemperatureK, v.PressurePa, v.Vibration)
+				written = append(written, key{v.Device, uint64(v.Seq)})
 				stored++
 			case *minutesTopic:
 				var v siteMinute
@@ -143,6 +162,11 @@ func main() {
 		}
 		for _, s := range spans {
 			s.End()
+		}
+		if stores != nil {
+			for _, k := range written {
+				_ = stores.Mark(ctx, hook.Store, k.device, k.seq)
+			}
 		}
 		if err := kc.CommitUncommittedOffsets(ctx); err != nil && ctx.Err() == nil {
 			log.Printf("commit offsets: %v", err)

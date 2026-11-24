@@ -118,9 +118,17 @@ Every few seconds (`-health-every`, default 5 s) the tap sends one report per ho
 
 The journey service treats a hop as not fully watched while reports say the tap was disconnected, dropped messages or was more than half the grace period behind, and while reports are missing. A stop or silence that such a stretch could explain is reported as waiting for the tap, not as a fault in the pipeline.
 
+## Watched payloads
+
+For devices on the watch list (set in the journey view, for an hour by default and at most a day, every change logged), the tap adds `hopwake.payload`: the payload as compact JSON, at most 16 KB, with the rules file's `redact` fields blanked. Payloads are kept 24 hours. Without a watch, nothing but the shape leaves the tap.
+
+## Counters
+
+Every few seconds (`-counts-every`, default 5 s) the tap sends, per hop, how many messages each device sent and how many were rejected or broke a schema, as one span with `hopwake.schema` = `counts/v1` and parallel comma-separated lists in `hopwake.counts.devices`, `.n`, `.errors` and `.last_ms`. Counters cover every message, also when hop events are sampled (`-sample N` keeps one journey in N, chosen from the journey ID so every hop agrees; watched devices, rejections and schema breaks are always kept). The store sums them per device, hop and five minutes.
+
 ## Window record
 
-One aggregated output and how to find its inputs.
+One aggregated output and how to find its inputs. A job adds it to each output as a Kafka header (`hopwake-window` in the reference aggregator); the tap reads it from a source with `role: aggregate` and sends it with `hopwake.schema` = `window/v1`. The journey service finds the inputs on request: hop events at the input hop, inside the window, from the listed devices. A device that fed the key's windows in the last 30 minutes but not this one is reported missing.
 
 | Field | Meaning |
 | --- | --- |

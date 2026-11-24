@@ -15,6 +15,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,6 +52,7 @@ func main() {
 	duration := flag.Duration("duration", 0, "stop after this long (0 runs until interrupted)")
 	renamed := flag.String("rename-devices", "", "comma-separated devices whose firmware renames temp_c to temperature")
 	renameAfter := flag.Duration("rename-after", 0, "when the firmware change takes effect, after start")
+	textPressure := flag.String("text-pressure-devices", "", "comma-separated devices whose firmware sends pressure_kpa as text, from the start")
 	flag.Parse()
 
 	renameSet := map[string]bool{}
@@ -60,6 +62,12 @@ func main() {
 		}
 	}
 	renameAt := time.Now().Add(*renameAfter)
+	textSet := map[string]bool{}
+	for _, d := range strings.Split(*textPressure, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			textSet[d] = true
+		}
+	}
 
 	if *devices < 1 || *sites < 1 || *conns < 1 {
 		log.Fatal("devices, sites and conns must be at least 1")
@@ -110,8 +118,11 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			firmware := func(now time.Time) bool { return renameSet[d.id] && !now.Before(renameAt) }
-			run(ctx, client, d, *interval, offset, byte(*qos), firmware, &sent, &failed)
+			fw := firmware{
+				renamed:      func(now time.Time) bool { return renameSet[d.id] && !now.Before(renameAt) },
+				textPressure: textSet[d.id],
+			}
+			run(ctx, client, d, *interval, offset, byte(*qos), fw, &sent, &failed)
 		}()
 	}
 
@@ -130,9 +141,14 @@ func main() {
 	}
 }
 
-// run publishes one device's readings. renamedFirmware reports whether, at a
-// given time, the device runs firmware that sends temperature instead of temp_c.
-func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Duration, qos byte, renamedFirmware func(time.Time) bool, sent, failed *atomic.Uint64) {
+// firmware describes what a device's firmware gets wrong, on purpose.
+type firmware struct {
+	renamed      func(time.Time) bool // at a given time, sends temperature instead of temp_c
+	textPressure bool                 // sends pressure_kpa as a string, e.g. "101.3"
+}
+
+// run publishes one device's readings.
+func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Duration, qos byte, fw firmware, sent, failed *atomic.Uint64) {
 	select {
 	case <-ctx.Done():
 		return
@@ -154,8 +170,11 @@ func run(ctx context.Context, c mqtt.Client, d *device, every, offset time.Durat
 			PressureK: round(101.3+rand.NormFloat64()*0.8, 2),
 			Vibration: round(math.Abs(1.5+rand.NormFloat64()*0.5), 3),
 		})
-		if err == nil && renamedFirmware(now) {
+		if err == nil && fw.renamed(now) {
 			body, err = renameField(body, "temp_c", "temperature")
+		}
+		if err == nil && fw.textPressure {
+			body, err = quoteField(body, "pressure_kpa")
 		}
 		if err != nil {
 			failed.Add(1)
@@ -179,6 +198,19 @@ func renameField(body []byte, from, to string) ([]byte, error) {
 	}
 	m[to] = m[from]
 	delete(m, from)
+	return json.Marshal(m)
+}
+
+// quoteField turns a number field into a string, as firmware that formats
+// its own JSON sometimes does.
+func quoteField(body []byte, name string) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, err
+	}
+	if v, ok := m[name].(float64); ok {
+		m[name] = strconv.FormatFloat(v, 'f', -1, 64)
+	}
 	return json.Marshal(m)
 }
 

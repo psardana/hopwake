@@ -57,7 +57,7 @@ func TestReferenceRulesFileLoads(t *testing.T) {
 			t.Errorf("no rule for %s", topic)
 		}
 	}
-	if len(c.Route) != 3 || c.Route[0].Hop != "mqtt:plant/+/+/telemetry" {
+	if len(c.Route) != 5 || len(c.RequiredHops()) != 4 || c.Route[0].Hop != "mqtt:plant/+/+/telemetry" {
 		t.Errorf("route = %v", c.Route)
 	}
 }
@@ -145,7 +145,7 @@ sources:
 route:
   - {hop: "mqtt:a/+", via: nobody}
 `))
-	if err == nil || !strings.Contains(err.Error(), "cannot have via") {
+	if err == nil || !strings.Contains(err.Error(), "cannot have via or mapping") {
 		t.Fatalf("via on the first hop: %v", err)
 	}
 }
@@ -170,5 +170,61 @@ route: [mqtt:a/+, kafka:b]
 		if _, err := ParseConfig([]byte(fmt.Sprintf(base, bad))); err == nil {
 			t.Errorf("rejects %s was accepted", bad)
 		}
+	}
+}
+
+func TestAggregateSource(t *testing.T) {
+	ok := `
+tenant: t
+sources:
+  - {name: a, kind: mqtt, match: a/+, device_from_topic: "a/{device}", seq_field: seq}
+  - {name: b, kind: kafka, match: b, device_field: device, seq_field: seq}
+  - {name: m, kind: kafka, match: minute, role: aggregate, window_header: hopwake-window}
+route: [mqtt:a/+, kafka:b]
+`
+	c, err := ParseConfig([]byte(ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Sources[2].Aggregate() {
+		t.Fatal("not an aggregate")
+	}
+	for _, bad := range []string{
+		strings.Replace(ok, "window_header: hopwake-window", "seq_field: seq", 1),
+		strings.Replace(ok, "role: aggregate, ", "", 1),
+		strings.Replace(ok, "[mqtt:a/+, kafka:b]", "[mqtt:a/+, kafka:b, kafka:minute]", 1),
+	} {
+		if _, err := ParseConfig([]byte(bad)); err == nil {
+			t.Errorf("accepted:\n%s", bad)
+		}
+	}
+}
+
+func TestHookSourcesAndOptionalSteps(t *testing.T) {
+	ok := `
+tenant: t
+sources:
+  - {name: a, kind: mqtt, match: a/+, device_from_topic: "a/{device}", seq_field: seq}
+  - {name: stored, kind: hook, match: db.stored}
+  - {name: served, kind: hook, match: api.served}
+route:
+  - mqtt:a/+
+  - {hop: hook:db.stored, via: recorder}
+  - {hop: hook:api.served, via: api, optional: true}
+`
+	c, err := ParseConfig([]byte(ok))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.RequiredHops(), " "); got != "mqtt:a/+ hook:db.stored" {
+		t.Fatalf("required %q", got)
+	}
+	if _, err := ParseConfig([]byte(strings.Replace(ok, "{name: stored, kind: hook, match: db.stored}", "{name: stored, kind: hook, match: db.stored, seq_field: seq}", 1))); err == nil {
+		t.Error("hook source with seq_field accepted")
+	}
+	swapped := strings.Replace(strings.Replace(ok, "{hop: hook:db.stored, via: recorder}", "X", 1), "{hop: hook:api.served, via: api, optional: true}", "{hop: hook:db.stored, via: recorder}", 1)
+	swapped = strings.Replace(swapped, "X", "{hop: hook:api.served, via: api, optional: true}", 1)
+	if _, err := ParseConfig([]byte(swapped)); err == nil {
+		t.Error("required hop after an optional one accepted")
 	}
 }

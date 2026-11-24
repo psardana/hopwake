@@ -71,6 +71,7 @@ services:
       OTEL_LOGS_EXPORTER: none
       FAULT_DEVICES: ${BRIDGE_FAULT_DEVICES:-}
       FAULT_DROP: ${BRIDGE_FAULT_DROP:-0}
+      FAULT_AFTER: ${BRIDGE_FAULT_AFTER:-0s}
       FAULT_DUPLICATE: ${BRIDGE_FAULT_DUPLICATE:-0}
       FAULT_DELAY: ${BRIDGE_FAULT_DELAY:-0s}
       FAULT_DELAY_RATE: ${BRIDGE_FAULT_DELAY_RATE:-0}
@@ -87,13 +88,16 @@ services:
     environment:
       NORMALISER_KAFKA: kafka:29092
       OTEL_SERVICE_NAME: normaliser
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
-      OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
+      # NORMALISER_OTEL_ENDPOINT sends only the normaliser's spans somewhere,
+      # e.g. to Hopwake's ingest, while the other services stay untraced.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${NORMALISER_OTEL_ENDPOINT:-${OTEL_ENDPOINT:-}}
+      OTEL_SDK_DISABLED: ${NORMALISER_OTEL_DISABLED:-${OTEL_SDK_DISABLED:-true}}
       OTEL_TRACES_SAMPLER: parentbased_traceidratio
       OTEL_TRACES_SAMPLER_ARG: ${OTEL_SAMPLE:-1}
       OTEL_METRICS_EXPORTER: none
       OTEL_LOGS_EXPORTER: none
       FAULT_DEVICES: ${NORMALISER_FAULT_DEVICES:-}
+      FAULT_KELVIN_DEVICES: ${NORMALISER_FAULT_KELVIN_DEVICES:-}
       FAULT_DROP: ${NORMALISER_FAULT_DROP:-0}
       FAULT_RENAME: ${NORMALISER_FAULT_RENAME:-0}
     depends_on:
@@ -145,6 +149,7 @@ services:
     environment:
       RECORDER_KAFKA: kafka:29092
       RECORDER_DB: postgres://hopwake:hopwake@postgres:5432/reference
+      HOPWAKE_OTLP_ENDPOINT: ${HOPWAKE_OTLP_ENDPOINT:-}
       OTEL_SERVICE_NAME: recorder
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
@@ -161,9 +166,12 @@ services:
         condition: service_healthy
 
   api:
-    build: ./api
+    build:
+      context: ..
+      dockerfile: reference/api/Dockerfile
     environment:
       API_DB: postgres://hopwake:hopwake@postgres:5432/reference
+      HOPWAKE_OTLP_ENDPOINT: ${HOPWAKE_OTLP_ENDPOINT:-}
       OTEL_SERVICE_NAME: api
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_ENDPOINT:-}
       OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-true}
@@ -184,7 +192,8 @@ services:
       args:
         CMD: devicesim
     command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-50}", "-interval", "${INTERVAL:-5s}",
-              "-rename-devices", "${FIRMWARE_RENAME_DEVICES:-}", "-rename-after", "${FIRMWARE_RENAME_AFTER:-0s}"]
+              "-rename-devices", "${FIRMWARE_RENAME_DEVICES:-}", "-rename-after", "${FIRMWARE_RENAME_AFTER:-0s}",
+              "-text-pressure-devices", "${FIRMWARE_TEXT_PRESSURE_DEVICES:-}"]
     depends_on:
       mosquitto:
         condition: service_healthy

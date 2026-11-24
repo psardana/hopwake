@@ -7,16 +7,19 @@ sources:
     match: plant/+/+/telemetry
     device_from_topic: plant/+/{device}/telemetry
     seq_field: seq
+    schema: schemas/raw.json
   - name: readings as the bridge forwards them
     kind: kafka
     match: telemetry.raw
     device_field: device_id
     seq_field: seq
+    schema: schemas/raw.json
   - name: normalised readings
     kind: kafka
     match: telemetry.normalized
     device_field: device
     seq_field: seq
+    schema: schemas/normalized.json
   # Readings the normaliser could not handle. They never reach normalized;
   # the tap records them as rejected, with the normaliser's reason.
   - name: readings the normaliser rejected
@@ -27,6 +30,20 @@ sources:
     role: dead-letter
     rejects: kafka:telemetry.normalized
     reason_header: dlq_reason
+  # Hops no tap can watch: the recorder and the API mark readings themselves.
+  - name: readings the recorder stored in Postgres
+    kind: hook
+    match: recorder.stored
+  - name: readings the API served
+    kind: hook
+    match: api.served
+  # Per-site, per-minute medians. Each output stands for many readings; the
+  # aggregator says which in a window record header.
+  - name: site medians
+    kind: kafka
+    match: telemetry.site_minute
+    role: aggregate
+    window_header: hopwake-window
 # The hops a reading should pass, in order. The journey service compares what
 # it sees with this to say where a device's data stopped. via names the
 # service that carries readings to a hop from the one before, so a stop
@@ -37,3 +54,33 @@ route:
     via: bridge
   - hop: kafka:telemetry.normalized
     via: normaliser
+    # How the normaliser maps fields, confirmed from Hopwake's proposal.
+    # Readings of watched devices are checked against it.
+    mapping:
+      device: device_id
+      site: site
+      seq: seq
+      observed_at: ts
+      temperature_k: temp_c + 273.15
+      pressure_pa: pressure_kpa * 1000
+      vibration_mm_s: vibration_mm_s
+  - hop: hook:recorder.stored
+    via: recorder
+  # Served only when someone asks for a device's readings: shown when it
+  # happens, never a reason for a stop.
+  - hop: hook:api.served
+    via: api
+    optional: true
+# Spans from services that already trace, mapped onto journeys by Hopwake's
+# ingest. The normaliser puts the reading's seq on its processing span.
+spans:
+  - name: normaliser processing
+    service: normaliser
+    span: process telemetry.raw
+    device_attr: device.id
+    seq_attr: reading.seq
+    hop: span:normaliser.process
+# Fields a tap blanks out before it sends the payload of a watched device
+# anywhere. The reference readings carry nothing personal; a fleet whose
+# payloads name people or places would list those fields here.
+redact: []

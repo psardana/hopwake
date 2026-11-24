@@ -43,9 +43,16 @@ class AggregatorTest {
 
       // A later record moves stream time past the window end plus grace.
       in.pipeInput("c", reading("c", "site-02", 280.0, 99000), t0.plusSeconds(90));
-      List<String> results = out.readValuesToList();
-      assertEquals(1, results.size());
-      JsonNode r = Aggregator.JSON.readTree(results.get(0));
+      var records = out.readRecordsToList();
+      assertEquals(1, records.size());
+      JsonNode r = Aggregator.JSON.readTree(records.get(0).value());
+      JsonNode w = Aggregator.JSON.readTree(records.get(0).headers().lastHeader("hopwake-window").value());
+      assertEquals("median", w.get("op").asText());
+      assertEquals("site-01", w.get("key").asText());
+      assertEquals("kafka:telemetry.normalized", w.get("input_hop").asText());
+      assertEquals(3, w.get("inputs").asInt());
+      assertEquals("[\"a\",\"b\"]", w.get("devices").toString());
+      assertEquals("2026-11-18T10:01:00Z", w.get("end").asText());
       assertEquals("site-01", r.get("site").asText());
       assertEquals(3, r.get("readings").asInt());
       assertEquals(2, r.get("devices").asInt());

@@ -28,6 +28,14 @@ class FaultsTest(unittest.TestCase):
         self.assertEqual(reason(ctx.exception), "no field temp_c")
 
 
+class KelvinFaultTest(unittest.TestCase):
+    def test_only_listed_devices_get_the_wrong_offset(self):
+        f = Faults(env={"FAULT_KELVIN_DEVICES": "dev-00044"})
+        self.assertEqual(normalise(RAW, kelvin=f.kelvin(RAW))["temperature_k"], 293.15)
+        wrong = dict(RAW, device_id="dev-00044")
+        self.assertEqual(normalise(wrong, kelvin=f.kelvin(wrong))["temperature_k"], 292.65)
+
+
 class NormaliseTest(unittest.TestCase):
     def test_converts_units_and_renames_fields(self):
         out = normalise({

@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,8 +34,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
+	"github.com/psardana/hopwake/internal/capture"
 	"github.com/psardana/hopwake/internal/hop"
 	"github.com/psardana/hopwake/internal/journey"
+	"github.com/psardana/hopwake/internal/schema"
 	"github.com/psardana/hopwake/internal/shape"
 )
 
@@ -106,6 +109,9 @@ func main() {
 	group := flag.String("group", env("TAP_GROUP", "hopwake-tap"), "Kafka consumer group of the tap")
 	every := flag.Duration("health-every", 5*time.Second, "how often the tap reports its own health per hop")
 	queue := flag.Int("mqtt-queue", 20000, "MQTT messages the tap may hold before it drops and counts them")
+	sample := flag.Uint64("sample", envUint("TAP_SAMPLE", 1), "send hop events for one reading in N (counters always cover all); watched devices, rejections and schema breaks are always sent")
+	countsEvery := flag.Duration("counts-every", 5*time.Second, "how often the tap sends per-device counters")
+	control := flag.String("control", env("TAP_CONTROL", ""), "journey service URL to read the watch list from; empty captures no payloads")
 	flag.Parse()
 
 	rules, err := journey.LoadConfig(*rulesPath)
@@ -135,11 +141,47 @@ func main() {
 	host, _ := os.Hostname()
 	tapID := fmt.Sprintf("%s/%d", host, os.Getpid())
 
+	// Declared schemas, per hop, and a counter for checking one reading in N.
+	validators := map[string]*schema.Validator{}
+	checked := map[string]*atomic.Uint64{}
+	for _, s := range rules.Sources {
+		if p := rules.SchemaPath(s); p != "" && !s.DeadLetter() {
+			v, err := schema.Load(p)
+			if err != nil {
+				log.Fatal(err)
+			}
+			validators[s.HopName()] = v
+			checked[s.HopName()] = &atomic.Uint64{}
+			log.Printf("%s: checking against %s, one reading in %d", s.HopName(), p, max(s.ValidateEvery, 1))
+		}
+	}
+
+	watched := &watchList{}
+	if *control != "" {
+		go watched.follow(ctx, strings.TrimRight(*control, "/")+"/api/watches", 5*time.Second)
+	}
+
+	ctr := &counters{hops: map[string]map[string]hop.Count{}, from: time.Now()}
+
 	var announced sync.Map // hop + fingerprint → struct{}: shapes whose fields were already sent
 	// header returns a message header by name; nil for MQTT.
 	observe := func(kind, topic string, payload []byte, header func(string) string, delay time.Duration) {
 		src, ok := rules.Source(kind, topic)
 		if !ok {
+			return
+		}
+		if src.Aggregate() {
+			var raw string
+			if header != nil {
+				raw = header(src.WindowHeader)
+			}
+			w, err := parseWindow(raw)
+			if err != nil {
+				hl.saw(src.HopName(), delay, false)
+				return
+			}
+			w.Tenant, w.Hop, w.Output, w.At = rules.Tenant, src.HopName(), string(payload), time.Now()
+			hl.saw(src.HopName(), delay, rec.RecordWindow(ctx, w) == nil)
 			return
 		}
 		rule, _ := rules.Rule(kind, topic)
@@ -154,6 +196,11 @@ func main() {
 			fields = sh.String()
 		}
 		op, reason := hop.OpReceive, ""
+		if v := validators[src.HopName()]; v != nil && checked[src.HopName()].Add(1)%uint64(max(src.ValidateEvery, 1)) == 0 {
+			if err := v.Check(payload); err != nil {
+				op, reason = hop.OpError, err.Error()
+			}
+		}
 		if src.DeadLetter() {
 			op, reason = hop.OpDrop, "rejected"
 			if header != nil && src.ReasonHeader != "" {
@@ -161,6 +208,16 @@ func main() {
 					reason = r
 				}
 			}
+		}
+		ctr.add(src.HopName(), key.Device, op != hop.OpReceive)
+		payloadCopy := ""
+		isWatched := watched.has(key.Device, time.Now())
+		if isWatched {
+			payloadCopy, _ = capture.Prepare(payload, rules.Redact)
+		}
+		if op == hop.OpReceive && !isWatched && !sampled(key.ID(), *sample) {
+			hl.saw(src.HopName(), delay, true)
+			return
 		}
 		err = rec.Record(ctx, hop.Event{
 			JourneyID:   key.ID(),
@@ -177,6 +234,7 @@ func main() {
 			At:          time.Now(),
 			ShapeFP:     sh.Fingerprint,
 			ShapeFields: fields,
+			Payload:     payloadCopy,
 		})
 		hl.saw(src.HopName(), delay, err == nil)
 	}
@@ -301,6 +359,25 @@ func main() {
 			})
 		}
 	}
+	go func() {
+		t := time.NewTicker(*countsEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				from, to, byHop := ctr.take()
+				for h, m := range byHop {
+					_ = rec.RecordCounts(ctx, rules.Tenant, h, from, to, m)
+				}
+			}
+		}
+	}()
+	if *sample > 1 {
+		log.Printf("sending hop events for one reading in %d; counters cover all", *sample)
+	}
+
 	tick := time.NewTicker(*every)
 	defer tick.Stop()
 	logTick := time.NewTicker(30 * time.Second)
@@ -336,6 +413,55 @@ func logTotals(hl *health) {
 		parts = append(parts, fmt.Sprintf("%s %d (missed %d)", h, hl.hops[h].totalSeen, hl.hops[h].totalMissed))
 	}
 	log.Printf("hop events since start: %s", strings.Join(parts, ", "))
+}
+
+// sampled decides from the journey ID whether a reading's hop events are
+// sent, so every hop and every tap makes the same choice.
+func sampled(journeyID string, n uint64) bool {
+	if n <= 1 || len(journeyID) < 8 {
+		return true
+	}
+	x, err := strconv.ParseUint(journeyID[:8], 16, 64)
+	return err != nil || x%n == 0
+}
+
+// counters counts every message per hop and device between flushes.
+type counters struct {
+	mu   sync.Mutex
+	hops map[string]map[string]hop.Count
+	from time.Time
+}
+
+func (c *counters) add(hopName, device string, isError bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m := c.hops[hopName]
+	if m == nil {
+		m = map[string]hop.Count{}
+		c.hops[hopName] = m
+	}
+	x := m[device]
+	x.N++
+	if isError {
+		x.Errors++
+	}
+	x.Last = time.Now()
+	m[device] = x
+}
+
+func (c *counters) take() (from, to time.Time, byHop map[string]map[string]hop.Count) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	from, to, byHop = c.from, time.Now(), c.hops
+	c.hops, c.from = map[string]map[string]hop.Count{}, to
+	return from, to, byHop
+}
+
+func envUint(key string, fallback uint64) uint64 {
+	if v, err := strconv.ParseUint(os.Getenv(key), 10, 64); err == nil && v > 0 {
+		return v
+	}
+	return fallback
 }
 
 func env(key, fallback string) string {

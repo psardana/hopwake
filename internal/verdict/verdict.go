@@ -27,12 +27,13 @@ type HopTime struct {
 
 // Journey is what was seen of one reading.
 type Journey struct {
-	ID      string    `json:"journey_id"`
-	Seq     uint64    `json:"seq"`
-	First   time.Time `json:"first"`
-	Hops    []HopTime `json:"hops"`
-	Reached int       `json:"reached"`            // index in the route of the furthest hop seen, -1 if none
-	Reason  string    `json:"rejected,omitempty"` // set when a service rejected the reading: why
+	ID      string            `json:"journey_id"`
+	Seq     uint64            `json:"seq"`
+	First   time.Time         `json:"first"`
+	Hops    []HopTime         `json:"hops"`
+	Reached int               `json:"reached"`            // index in the route of the furthest hop seen, -1 if none
+	Reason  string            `json:"rejected,omitempty"` // set when a service rejected the reading: why
+	Invalid map[string]string `json:"invalid,omitempty"`  // hops where the reading broke the declared schema, with why
 }
 
 // Verdict is the answer for one device.
@@ -223,7 +224,7 @@ type Event struct {
 	Seq       uint64
 	Hop       string
 	At        time.Time
-	Op        string // "drop" marks a rejection
+	Op        string // "drop" marks a rejection, "error" a reading that broke a declared schema
 	Reason    string
 }
 
@@ -245,18 +246,21 @@ func Assemble(events []Event, maxSpan time.Duration) []Journey {
 		if e.Op == "drop" && e.Reason == "" {
 			e.Reason = "rejected"
 		}
-		if n > 0 && out[n-1].ID == e.JourneyID && e.At.Sub(out[n-1].First) <= maxSpan {
-			out[n-1].Hops = append(out[n-1].Hops, HopTime{Hop: e.Hop, At: e.At})
-			if e.Op == "drop" {
-				out[n-1].Reason = e.Reason
-			}
-			continue
+		if n == 0 || out[n-1].ID != e.JourneyID || e.At.Sub(out[n-1].First) > maxSpan {
+			out = append(out, Journey{ID: e.JourneyID, Seq: e.Seq, First: e.At})
+			n++
 		}
-		j := Journey{ID: e.JourneyID, Seq: e.Seq, First: e.At, Hops: []HopTime{{Hop: e.Hop, At: e.At}}}
-		if e.Op == "drop" {
+		j := &out[n-1]
+		j.Hops = append(j.Hops, HopTime{Hop: e.Hop, At: e.At})
+		switch e.Op {
+		case "drop":
 			j.Reason = e.Reason
+		case "error":
+			if j.Invalid == nil {
+				j.Invalid = map[string]string{}
+			}
+			j.Invalid[e.Hop] = e.Reason
 		}
-		out = append(out, j)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].First.After(out[j].First) })
 	return out
