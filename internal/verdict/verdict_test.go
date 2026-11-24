@@ -130,3 +130,23 @@ func TestAssembleSplitsReadingsFromDifferentBoots(t *testing.T) {
 		t.Fatalf("the original reading keeps both hops: %+v", js[2])
 	}
 }
+
+func TestStopAtNamedService(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	route := []string{"mqtt", "raw", "normalized"}
+	var js []Journey
+	for i := 0; i < 5; i++ {
+		at := now.Add(-time.Duration(30+i) * time.Second)
+		js = append(js, Journey{ID: string(rune('a' + i)), First: at, Hops: []HopTime{{"mqtt", at}}})
+	}
+	v := Decide("d", route, js, now, 15*time.Second, nil)
+	v.At("d", "bridge")
+	if v.StoppedAt != "bridge" || !strings.Contains(v.Sentence, "stop at bridge") || !strings.Contains(v.Sentence, "never arrived at raw") {
+		t.Fatalf("%+v", v)
+	}
+	ok := Verdict{State: OK, Sentence: "fine"}
+	ok.At("d", "bridge")
+	if ok.StoppedAt != "" || ok.Sentence != "fine" {
+		t.Fatalf("At changed a healthy verdict: %+v", ok)
+	}
+}

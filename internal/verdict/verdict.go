@@ -39,6 +39,7 @@ type Verdict struct {
 	State        State         `json:"state"`
 	Sentence     string        `json:"sentence"`
 	StoppedAfter string        `json:"stopped_after,omitempty"`
+	StoppedAt    string        `json:"stopped_at,omitempty"` // the service between StoppedAfter and NotReached, when known
 	NotReached   string        `json:"not_reached,omitempty"`
 	Since        *time.Time    `json:"since,omitempty"`
 	Missing      int           `json:"missing,omitempty"`
@@ -133,6 +134,18 @@ func Decide(device string, route []string, journeys []Journey, now time.Time, gr
 	v.Sentence = fmt.Sprintf("%s: readings stop after %s. %d readings since %s did not reach %s.",
 		device, route[stop], run, since.Format("15:04:05 MST"), route[stop+1])
 	return v
+}
+
+// At names the service between the hop readings reached and the one they
+// did not, and says the stop is there. It does nothing unless the verdict is
+// a stop between two hops.
+func (v *Verdict) At(device, service string) {
+	if v.State != Stopped || v.NotReached == "" || service == "" || v.Since == nil {
+		return
+	}
+	v.StoppedAt = service
+	v.Sentence = fmt.Sprintf("%s: readings stop at %s. %d readings since %s reached %s and never arrived at %s.",
+		device, service, v.Missing, v.Since.Format("15:04:05 MST"), v.StoppedAfter, v.NotReached)
 }
 
 // Quick judges a device from only the last time each hop saw it, which is

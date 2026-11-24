@@ -18,8 +18,12 @@ sources:
     device_field: device
     seq_field: seq
 # The hops a reading should pass, in order. The journey service compares what
-# it sees with this to say where a device's data stopped.
+# it sees with this to say where a device's data stopped. via names the
+# service that carries readings to a hop from the one before, so a stop
+# between two hops is reported as a stop at that service.
 route:
-  - mqtt:plant/+/+/telemetry
-  - kafka:telemetry.raw
-  - kafka:telemetry.normalized
+  - hop: mqtt:plant/+/+/telemetry
+  - hop: kafka:telemetry.raw
+    via: bridge
+  - hop: kafka:telemetry.normalized
+    via: normaliser

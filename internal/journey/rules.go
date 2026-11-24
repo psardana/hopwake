@@ -25,14 +25,58 @@ import (
 //	    device_field: device
 //	    seq_field: seq
 //	route:
-//	  - mqtt:plant/+/+/telemetry
-//	  - kafka:telemetry.normalized
+//	  - hop: mqtt:plant/+/+/telemetry
+//	  - hop: kafka:telemetry.normalized
+//	    via: normaliser
 //
-// Route lists the hops a reading should pass, in order, by HopName.
+// Route lists the hops a reading should pass, in order, by HopName. A step
+// may name the service that carries readings to it from the step before
+// (via), so a stop between two hops can be reported as a stop at that
+// service. A step may also be written as just the hop name.
 type Config struct {
 	Tenant  string   `yaml:"tenant"`
 	Sources []Source `yaml:"sources"`
-	Route   []string `yaml:"route"`
+	Route   []Step   `yaml:"route"`
+}
+
+// Step is one hop of the route.
+type Step struct {
+	Hop string `yaml:"hop"`
+	Via string `yaml:"via"` // the service between the previous hop and this one; optional
+}
+
+// UnmarshalYAML accepts a step as a plain hop name or as a mapping.
+func (s *Step) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		s.Hop = n.Value
+		return nil
+	}
+	type plain Step
+	var p plain
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*s = Step(p)
+	return nil
+}
+
+// Hops returns the route's hop names in order.
+func (c *Config) Hops() []string {
+	out := make([]string, len(c.Route))
+	for i, s := range c.Route {
+		out[i] = s.Hop
+	}
+	return out
+}
+
+// Via returns the service that carries readings to hop, if the route names one.
+func (c *Config) Via(hop string) string {
+	for _, s := range c.Route {
+		if s.Hop == hop {
+			return s.Via
+		}
+	}
+	return ""
 }
 
 // HopName is how hop events name the place a source is read: kind, a colon,
@@ -110,7 +154,11 @@ func (c *Config) check() error {
 		known[s.HopName()] = true
 	}
 	seen := map[string]bool{}
-	for _, h := range c.Route {
+	for i, st := range c.Route {
+		h := st.Hop
+		if i == 0 && st.Via != "" {
+			return fmt.Errorf("route: the first hop %q has nothing before it, so it cannot have via", h)
+		}
 		if !known[h] {
 			return fmt.Errorf("route: %q is not a source (use kind:match)", h)
 		}

@@ -61,6 +61,8 @@
   .hop.sel { border-color: var(--line); background: var(--panel); }
   .hop .line { display: flex; align-items: center; gap: 6px; }
   .hop .bar { flex: 1; height: 1px; background: var(--off); }
+  .hop .via { font-family: var(--mono); font-size: 10px; color: var(--quiet); white-space: nowrap; }
+  .hop .via.bad { color: var(--warn); }
   .hop .k { margin-top: 10px; font-weight: 500; white-space: nowrap; }
   .hop .m { color: var(--quiet); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .ring { width: 9px; height: 9px; border-radius: 50%; flex: none; }
@@ -141,8 +143,8 @@ function recentList() { try { return JSON.parse(localStorage.getItem('hopwake-re
 function remember(d) { const r = [d, ...recentList().filter(x => x !== d)].slice(0, 6); try { localStorage.setItem('hopwake-recent', JSON.stringify(r)); } catch {} }
 const win = () => $('window').value;
 
-function stateChip(state, after, expected) {
-  if (state === 'stopped') return `<span class="chip bad"><span class="dot bad"></span>${after ? `Stops after ${esc(hopShort(after))}` : 'Stopped'}</span>`;
+function stateChip(state, after, expected, at) {
+  if (state === 'stopped') return `<span class="chip bad"><span class="dot bad"></span>${at ? `Stops at ${esc(at)}` : after ? `Stops after ${esc(hopShort(after))}` : 'Stopped'}</span>`;
   if (state === 'silent') return '<span class="chip bad"><span class="dot bad"></span>Silent</span>';
   if (state === 'unknown') return expected ? '<span class="chip bad"><span class="dot bad"></span>Never seen</span>' : '<span class="chip">Never seen</span>';
   return '<span class="chip"><span class="dot"></span>Healthy</span>';
@@ -173,7 +175,7 @@ function renderFleet() {
     <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
     <section class="panel" style="overflow-x:auto" aria-label="Devices">
       ${devs.length ? `<table><thead><tr><th>Device</th><th>State</th>${route.map(h => `<th>Last seen at ${esc(hopShort(h))}</th>`).join('')}</tr></thead><tbody>
-      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
+      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
       </tbody></table>` : '<div class="empty">No hop events in this window yet. Is the tap running?</div>'}
     </section>`;
   for (const tr of document.querySelectorAll('tbody tr')) tr.onclick = () => location.hash = `#/device/${encodeURIComponent(tr.dataset.d)}`;
@@ -192,7 +194,8 @@ async function renderDevice(device) {
   const bad = v.state === 'stopped' || v.state === 'silent';
   // The server's sentence uses the server's clock; say it again in local time.
   const sentence = v.state === 'stopped' && v.not_reached
-    ? `Readings stop after ${hopShort(v.stopped_after)}. ${v.missing} readings since ${time(v.since)} did not reach ${hopShort(v.not_reached)}.`
+    ? v.stopped_at ? `Readings stop at the ${v.stopped_at}. ${v.missing} readings since ${time(v.since)} reached ${hopShort(v.stopped_after)} and never arrived at ${hopShort(v.not_reached)}.`
+    : `Readings stop after ${hopShort(v.stopped_after)}. ${v.missing} readings since ${time(v.since)} did not reach ${hopShort(v.not_reached)}.`
     : v.state === 'silent' && v.since ? `No readings at any hop since ${time(v.since)}.`
     : v.state === 'ok' && v.median_ns ? `Readings reach every hop, ${ms(v.median_ns)} from first to last.`
     : v.sentence;
@@ -209,7 +212,7 @@ async function renderDevice(device) {
     const ring = isStop ? 'var(--warn-dot)' : done ? 'var(--dot)' : 'var(--off)';
     const meta = isStop ? 'last hop reached' : stat[h] ? `${stat[h].count} · ${ago(stat[h].last_seen)}` : 'not seen';
     return `<button type="button" class="hop ${i === selHop ? 'sel' : ''}" data-i="${i}">
-      <span class="line"><span class="ring" style="background:${fill};box-shadow:inset 0 0 0 1.5px ${ring}${isStop ? ',0 0 0 3px var(--warn-bg)' : ''}"></span>${i < last ? `<span class="bar" style="background:${reached > i && !(isStop) ? 'var(--dot)' : 'var(--off)'}"></span>` : ''}</span>
+      <span class="line"><span class="ring" style="background:${fill};box-shadow:inset 0 0 0 1.5px ${ring}${isStop ? ',0 0 0 3px var(--warn-bg)' : ''}"></span>${i < last ? (() => { const bar = `<span class="bar" style="background:${reached > i && !(isStop) ? 'var(--dot)' : 'var(--off)'}"></span>`; const via = (d.via || {})[route[i + 1]]; return via ? `${bar}<span class="via ${isStop ? 'bad' : ''}" title="service between ${esc(hopShort(h))} and ${esc(hopShort(route[i + 1]))}">${esc(via)}</span>${bar}` : bar; })() : ''}</span>
       <div class="k" style="color:${i > reached && !isStop && reached >= 0 ? 'var(--quiet)' : 'var(--ink)'}">${esc(hopShort(h))}</div>
       <div class="m mono" title="${esc(h)}">${esc(hopKind(h))} · ${esc(meta)}</div>
       ${shapeBy[h] ? `<div class="m mono" title="shape ${esc(shapeBy[h].current.fingerprint)}">shape ${esc(shapeBy[h].current.fingerprint.slice(0, 6))} · ${(shapeBy[h].current.fields || []).length} fields</div>` : ''}
@@ -236,7 +239,7 @@ async function renderDevice(device) {
   $('view').innerHTML = `
     <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
       <div style="flex:1 1 400px">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after, (fleet.devices.find(x => x.device === d.device) || {}).expected)}</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after, (fleet.devices.find(x => x.device === d.device) || {}).expected, v.stopped_at)}</div>
         <p style="margin:6px 0 0;color:${bad ? 'var(--ink)' : 'var(--quiet)'}">${esc(fullSentence)}</p>
       </div>
       <button class="btn" type="button" id="copyLink">Copy link</button>
@@ -265,7 +268,7 @@ async function renderDevice(device) {
           ${selHop === stopIdx && v.missing ? `<dt>Missing after it</dt><dd style="color:var(--warn)">${v.missing} since ${time(v.since)}</dd>` : ''}
         </dl>
         ${shapePanel(shapeBy[h])}
-        ${selHop === stopIdx && v.not_reached ? `<div class="quiet" style="border-top:1px solid var(--line2);padding-top:12px">Readings reach <span class="mono">${esc(hopShort(h))}</span> and never arrive at <span class="mono">${esc(hopShort(v.not_reached))}</span>. Whatever sits between those two hops is where to look.</div>` : ''}
+        ${selHop === stopIdx && v.not_reached ? `<div class="quiet" style="border-top:1px solid var(--line2);padding-top:12px">Readings reach <span class="mono">${esc(hopShort(h))}</span> and never arrive at <span class="mono">${esc(hopShort(v.not_reached))}</span>. ${v.stopped_at ? `The ${esc(v.stopped_at)} carries them between those two hops: look there first.` : 'Whatever sits between those two hops is where to look.'}</div>` : ''}
       </aside>
     </div>`;
   for (const b of document.querySelectorAll('.hop')) b.onclick = () => { selHop = Number(b.dataset.i); renderDevice(device); };

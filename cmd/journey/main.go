@@ -166,7 +166,7 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(c)
 	}()
-	log.Printf("journey service on %s, route %s", *listen, strings.Join(rules.Route, " → "))
+	log.Printf("journey service on %s, route %s", *listen, strings.Join(rules.Hops(), " → "))
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -286,7 +286,8 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	v := verdict.Decide(device, s.rules.Route, js, now, s.grace, lastSeen)
+	v := verdict.Decide(device, s.rules.Hops(), js, now, s.grace, lastSeen)
+	v.At(device, s.rules.Via(v.NotReached))
 	if len(js) > 50 {
 		js = js[:50]
 	}
@@ -294,7 +295,8 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		"tenant":   tenant,
 		"device":   device,
 		"window":   window.String(),
-		"route":    s.rules.Route,
+		"route":    s.rules.Hops(),
+		"via":      s.via(),
 		"verdict":  v,
 		"hops":     stats,
 		"shapes":   shapes,
@@ -363,7 +365,7 @@ func (s *server) shapeHistory(ctx context.Context, tenant, device string, from t
 		return x
 	}
 	out := []hopShapes{}
-	for _, h := range s.rules.Route {
+	for _, h := range s.rules.Hops() {
 		seen := byHop[h]
 		if len(seen) == 0 {
 			continue
@@ -387,6 +389,7 @@ type fleetDevice struct {
 	Device       string               `json:"device"`
 	State        verdict.State        `json:"state"`
 	StoppedAfter string               `json:"stopped_after,omitempty"`
+	StoppedAt    string               `json:"stopped_at,omitempty"`
 	LastSeen     map[string]time.Time `json:"last_seen"`
 	LastEver     *time.Time           `json:"last_ever,omitempty"` // for expected devices not seen in the window
 	Expected     bool                 `json:"expected"`
@@ -454,8 +457,8 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]fleetDevice, 0, len(last)+len(s.expected))
 	for device, seen := range last {
-		state, after := verdict.Quick(s.rules.Route, seen, now, s.grace, s.grace+45*time.Second)
-		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, LastSeen: seen, Expected: expected[device], ShapeChanged: changed[device]})
+		state, after := verdict.Quick(s.rules.Hops(), seen, now, s.grace, s.grace+45*time.Second)
+		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, StoppedAt: s.serviceAfter(after), LastSeen: seen, Expected: expected[device], ShapeChanged: changed[device]})
 	}
 
 	// Expected devices with nothing in the window: silent if ever seen, else never seen.
@@ -497,7 +500,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Device < out[j].Device
 	})
-	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Route, "window": window.String(), "expected": len(s.expected), "devices": out})
+	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "via": s.via(), "window": window.String(), "expected": len(s.expected), "devices": out})
 }
 
 func (s *server) journey(w http.ResponseWriter, r *http.Request) {
@@ -530,7 +533,30 @@ func (s *server) journey(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, x)
 	}
-	writeJSON(w, map[string]any{"journey_id": id, "route": s.rules.Route, "hops": out})
+	writeJSON(w, map[string]any{"journey_id": id, "route": s.rules.Hops(), "via": s.via(), "hops": out})
+}
+
+// via maps each hop to the service that carries readings to it, where the
+// route names one.
+func (s *server) via() map[string]string {
+	out := map[string]string{}
+	for _, st := range s.rules.Route {
+		if st.Via != "" {
+			out[st.Hop] = st.Via
+		}
+	}
+	return out
+}
+
+// serviceAfter is the service between hop and the next hop of the route.
+func (s *server) serviceAfter(hop string) string {
+	hops := s.rules.Hops()
+	for i := 0; i+1 < len(hops); i++ {
+		if hops[i] == hop {
+			return s.rules.Via(hops[i+1])
+		}
+	}
+	return ""
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

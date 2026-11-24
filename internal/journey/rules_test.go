@@ -56,7 +56,7 @@ func TestReferenceRulesFileLoads(t *testing.T) {
 			t.Errorf("no rule for %s", topic)
 		}
 	}
-	if len(c.Route) != 3 || c.Route[0] != "mqtt:plant/+/+/telemetry" {
+	if len(c.Route) != 3 || c.Route[0].Hop != "mqtt:plant/+/+/telemetry" {
 		t.Errorf("route = %v", c.Route)
 	}
 }
@@ -112,5 +112,39 @@ func TestConfigRejects(t *testing.T) {
 		if _, err := ParseConfig([]byte(yml)); err == nil || !strings.Contains(err.Error(), "journey rules") {
 			t.Errorf("%s: got %v, want an error", name, err)
 		}
+	}
+}
+
+func TestRouteStepsWithVia(t *testing.T) {
+	c, err := ParseConfig([]byte(`
+tenant: t
+sources:
+  - {name: a, kind: mqtt, match: a/+, device_from_topic: "a/{device}", seq_field: seq}
+  - {name: b, kind: kafka, match: b, device_field: device, seq_field: seq}
+  - {name: c, kind: kafka, match: c, device_field: device, seq_field: seq}
+route:
+  - mqtt:a/+
+  - hop: kafka:b
+    via: bridge
+  - hop: kafka:c
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Hops(), " "); got != "mqtt:a/+ kafka:b kafka:c" {
+		t.Fatalf("hops %q", got)
+	}
+	if c.Via("kafka:b") != "bridge" || c.Via("kafka:c") != "" || c.Via("mqtt:a/+") != "" {
+		t.Fatalf("via: %+v", c.Route)
+	}
+	_, err = ParseConfig([]byte(`
+tenant: t
+sources:
+  - {name: a, kind: mqtt, match: a/+, device_from_topic: "a/{device}", seq_field: seq}
+route:
+  - {hop: "mqtt:a/+", via: nobody}
+`))
+	if err == nil || !strings.Contains(err.Error(), "cannot have via") {
+		t.Fatalf("via on the first hop: %v", err)
 	}
 }
