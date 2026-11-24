@@ -17,6 +17,16 @@ sources:
     match: telemetry.normalized
     device_field: device
     seq_field: seq
+  # Readings the normaliser could not handle. They never reach normalized;
+  # the tap records them as rejected, with the normaliser's reason.
+  - name: readings the normaliser rejected
+    kind: kafka
+    match: telemetry.dlq
+    device_field: device_id
+    seq_field: seq
+    role: dead-letter
+    rejects: kafka:telemetry.normalized
+    reason_header: dlq_reason
 # The hops a reading should pass, in order. The journey service compares what
 # it sees with this to say where a device's data stopped. via names the
 # service that carries readings to a hop from the one before, so a stop

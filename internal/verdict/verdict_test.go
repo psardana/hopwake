@@ -1,6 +1,7 @@
 package verdict
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -148,5 +149,29 @@ func TestStopAtNamedService(t *testing.T) {
 	ok.At("d", "bridge")
 	if ok.StoppedAt != "" || ok.Sentence != "fine" {
 		t.Fatalf("At changed a healthy verdict: %+v", ok)
+	}
+}
+
+func TestRejectionsNameTheReason(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	route := []string{"mqtt", "raw", "normalized"}
+	var ev []Event
+	for i := 0; i < 6; i++ {
+		at := now.Add(-time.Duration(30+i) * time.Second)
+		id := fmt.Sprintf("j%d", i)
+		ev = append(ev, Event{JourneyID: id, Hop: "mqtt", At: at}, Event{JourneyID: id, Hop: "raw", At: at.Add(time.Millisecond)})
+		if i < 4 {
+			ev = append(ev, Event{JourneyID: id, Hop: "dlq", At: at.Add(2 * time.Millisecond), Op: "drop", Reason: "no field temp_c"})
+		}
+	}
+	js := Assemble(ev, time.Minute)
+	v := Decide("d", route, js, now, 15*time.Second, nil)
+	if v.State != Stopped || v.Missing != 6 || v.Rejected != 4 || v.Reason != "no field temp_c" || v.NotReached != "normalized" {
+		t.Fatalf("%+v", v)
+	}
+	v.At("d", "normaliser")
+	want := "the normaliser rejected 4 readings since"
+	if !strings.Contains(v.Sentence, want) || !strings.Contains(v.Sentence, ": no field temp_c. 2 more never arrived at normalized.") {
+		t.Fatalf("sentence %q", v.Sentence)
 	}
 }

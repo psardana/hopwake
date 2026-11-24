@@ -72,6 +72,7 @@
   .grow.pick { cursor: pointer; }
   .grow.pick:hover { background: var(--line2); }
   .cell { width: 9px; height: 9px; border-radius: 50%; margin: auto; }
+  .cell.rej { width: auto; height: auto; border-radius: 0; color: var(--warn); font-weight: 600; line-height: 1; }
   .split { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start; }
   dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
   dt { color: var(--quiet); }
@@ -143,11 +144,33 @@ function recentList() { try { return JSON.parse(localStorage.getItem('hopwake-re
 function remember(d) { const r = [d, ...recentList().filter(x => x !== d)].slice(0, 6); try { localStorage.setItem('hopwake-recent', JSON.stringify(r)); } catch {} }
 const win = () => $('window').value;
 
-function stateChip(state, after, expected, at) {
-  if (state === 'stopped') return `<span class="chip bad"><span class="dot bad"></span>${at ? `Stops at ${esc(at)}` : after ? `Stops after ${esc(hopShort(after))}` : 'Stopped'}</span>`;
+function stateChip(state, after, expected, at, rejected) {
+  if (state === 'stopped') return `<span class="chip bad"><span class="dot bad"></span>${rejected && at ? `Rejected at ${esc(at)}` : rejected ? 'Rejected' : at ? `Stops at ${esc(at)}` : after ? `Stops after ${esc(hopShort(after))}` : 'Stopped'}</span>`;
+  if (state === 'unsure') return '<span class="chip" title="the tap did not fully watch a hop this verdict depends on"><span class="dot"></span>Waiting for tap</span>';
   if (state === 'silent') return '<span class="chip bad"><span class="dot bad"></span>Silent</span>';
   if (state === 'unknown') return expected ? '<span class="chip bad"><span class="dot bad"></span>Never seen</span>' : '<span class="chip">Never seen</span>';
   return '<span class="chip"><span class="dot"></span>Healthy</span>';
+}
+// What the tap missed at a hop, in local time.
+function tapText(b) {
+  const recent = Date.now() - new Date(b.to) < 15000;
+  if (b.away) return `The tap was not watching ${hopShort(b.hop)} from ${time(b.from)}${recent ? '' : ` to ${time(b.to)}`}`;
+  if (b.missed) return `The tap missed ${b.missed} readings at ${hopShort(b.hop)} since ${time(b.from)}`;
+  return `The tap fell ${Math.round(b.behind_ns / 1e9)} s behind at ${hopShort(b.hop)}`;
+}
+// One sentence per kind of trouble, hops in route order.
+function tapSummary(list, route) {
+  const order = h => { const i = route.indexOf(h); return i < 0 ? 99 : i; };
+  const groups = new Map();
+  for (const b of [...list].sort((x, y) => order(x.hop) - order(y.hop))) {
+    const key = b.away ? `away ${time(b.from)}` : b.missed ? `missed ${b.hop}` : `behind ${b.hop}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(b);
+  }
+  const names = bs => { const n = bs.map(b => hopShort(b.hop)); return n.length > 1 ? `${n.slice(0, -1).join(', ')} and ${n[n.length - 1]}` : n[0]; };
+  return [...groups.values()].map(bs => bs[0].away && bs.length > 1
+    ? `The tap was not watching ${names(bs)} from ${time(bs[0].from)}.`
+    : `${tapText(bs[0])}.`).join(' ');
 }
 const isProblem = d => d.state === 'stopped' || d.state === 'silent' || (d.state === 'unknown' && d.expected);
 
@@ -172,10 +195,11 @@ function renderFleet() {
     : `${devs.length} devices seen in the ${esc(win())} window`;
   $('view').innerHTML = `
     <div><h1>Fleet</h1><p class="quiet" style="margin:6px 0 0">${intro}, judged against the route ${route.map(h => `<span class="mono">${esc(hopShort(h))}</span>`).join(' → ')}.</p></div>
-    <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
+    ${(fleet.tap || []).length ? `<p class="quiet" style="margin:0">${esc(tapSummary(fleet.tap, route))} Verdicts that depend on ${fleet.tap.length > 1 ? 'those hops' : 'that hop'} wait until it catches up.</p>` : ''}
+    <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${n('unsure') ? `<span class="chip">${n('unsure')} waiting for the tap</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
     <section class="panel" style="overflow-x:auto" aria-label="Devices">
       ${devs.length ? `<table><thead><tr><th>Device</th><th>State</th>${route.map(h => `<th>Last seen at ${esc(hopShort(h))}</th>`).join('')}</tr></thead><tbody>
-      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
+      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at, d.rejected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
       </tbody></table>` : '<div class="empty">No hop events in this window yet. Is the tap running?</div>'}
     </section>`;
   for (const tr of document.querySelectorAll('tbody tr')) tr.onclick = () => location.hash = `#/device/${encodeURIComponent(tr.dataset.d)}`;
@@ -193,7 +217,12 @@ async function renderDevice(device) {
   const stat = Object.fromEntries((d.hops || []).map(h => [h.hop, h]));
   const bad = v.state === 'stopped' || v.state === 'silent';
   // The server's sentence uses the server's clock; say it again in local time.
-  const sentence = v.state === 'stopped' && v.not_reached
+  const lostToo = v.missing - (v.rejected || 0);
+  const waiting = v.state === 'unsure' ? (d.tap || []).find(b => b.hop === v.waiting_on) : null;
+  const sentence = waiting ? `${tapText(waiting)}; no verdict until it catches up.`
+    : v.state === 'stopped' && v.not_reached && v.rejected
+    ? `${v.stopped_at ? `The ${v.stopped_at}` : `A service before ${hopShort(v.not_reached)}`} rejected ${v.rejected} readings since ${time(v.since)}: ${v.reason}.${lostToo > 0 ? ` ${lostToo} more never arrived at ${hopShort(v.not_reached)}.` : ''}`
+    : v.state === 'stopped' && v.not_reached
     ? v.stopped_at ? `Readings stop at the ${v.stopped_at}. ${v.missing} readings since ${time(v.since)} reached ${hopShort(v.stopped_after)} and never arrived at ${hopShort(v.not_reached)}.`
     : `Readings stop after ${hopShort(v.stopped_after)}. ${v.missing} readings since ${time(v.since)} did not reach ${hopShort(v.not_reached)}.`
     : v.state === 'silent' && v.since ? `No readings at any hop since ${time(v.since)}.`
@@ -228,6 +257,7 @@ async function renderDevice(device) {
       ${route.map((h, i) => {
         const hit = at.has(h);
         const missing = !hit && !young && i === j.reached + 1;
+        if (missing && j.rejected) return `<span class="cell rej" title="rejected: ${esc(j.rejected)}">×</span>`;
         return `<span class="cell" style="background:${hit ? 'var(--dot)' : 'transparent'};box-shadow:inset 0 0 0 1.5px ${hit ? 'var(--dot)' : missing ? 'var(--warn-dot)' : 'var(--off)'}"></span>`;
       }).join('')}</div>`;
   }).join('');
@@ -239,7 +269,7 @@ async function renderDevice(device) {
   $('view').innerHTML = `
     <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
       <div style="flex:1 1 400px">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after, (fleet.devices.find(x => x.device === d.device) || {}).expected, v.stopped_at)}</div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after, (fleet.devices.find(x => x.device === d.device) || {}).expected, v.stopped_at, v.rejected > 0)}</div>
         <p style="margin:6px 0 0;color:${bad ? 'var(--ink)' : 'var(--quiet)'}">${esc(fullSentence)}</p>
       </div>
       <button class="btn" type="button" id="copyLink">Copy link</button>
@@ -266,6 +296,7 @@ async function renderDevice(device) {
           <dt>Last seen</dt><dd>${s ? time(s.last_seen) : '—'}</dd>
           <dt>Readings that got here</dt><dd style="color:${total && reachedHere < total ? 'var(--warn)' : 'inherit'}">${total ? `${reachedHere} of ${total}` : '—'}</dd>
           ${selHop === stopIdx && v.missing ? `<dt>Missing after it</dt><dd style="color:var(--warn)">${v.missing} since ${time(v.since)}</dd>` : ''}
+          ${selHop === stopIdx && v.rejected ? `<dt>Rejected by the ${esc(v.stopped_at || 'next service')}</dt><dd style="color:var(--warn)">${v.rejected}</dd><dt>Reason</dt><dd class="mono" style="color:var(--warn)">${esc(v.reason)}</dd>` : ''}
         </dl>
         ${shapePanel(shapeBy[h])}
         ${selHop === stopIdx && v.not_reached ? `<div class="quiet" style="border-top:1px solid var(--line2);padding-top:12px">Readings reach <span class="mono">${esc(hopShort(h))}</span> and never arrive at <span class="mono">${esc(hopShort(v.not_reached))}</span>. ${v.stopped_at ? `The ${esc(v.stopped_at)} carries them between those two hops: look there first.` : 'Whatever sits between those two hops is where to look.'}</div>` : ''}

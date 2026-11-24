@@ -56,7 +56,7 @@ Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them.
 
 | Attribute | Field |
 | --- | --- |
-| `hopwake.schema` | `hop/v1` (adds the shape attributes to `hop/v0`) |
+| `hopwake.schema` | `hop/v1` (adds the shape and reason attributes to `hop/v0`) |
 | `hopwake.tenant` | `tenant` |
 | `hopwake.device.id` | `device_id` |
 | `hopwake.seq` | the device's sequence number |
@@ -67,6 +67,7 @@ Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them.
 | `hopwake.payload.bytes` | `bytes` |
 | `hopwake.schema.fp` | fingerprint of the payload's shape (field paths and types) at this hop |
 | `hopwake.shape.fields` | the shape's fields, on the first event of a new shape only |
+| `hopwake.reason` | why a reading was rejected or failed, on `drop` and `error` events |
 | `messaging.system`, `messaging.destination.name` | where the reading was seen, per the OpenTelemetry messaging conventions |
 
 ## Journey ID
@@ -83,6 +84,39 @@ A device that reboots usually starts its sequence number again, so its new readi
 
 - **Boot field.** When the payload carries a boot counter or boot ID, `boot_field` on the source adds it to the journey ID, so readings from different boots never share an ID. Every source on a route must name the same boot information.
 - **Time split.** Without a boot field, the journey service treats events with the same journey ID that lie more than `-journey-span` apart (default 60 s) as different readings. This fails only if a device reboots and reaches the same sequence number within that span.
+
+## Rejections
+
+A source marked `role: dead-letter` holds readings a service rejected. The tap records each one as a hop event with `op: drop` at the dead-letter hop, with the reason taken from the header named by `reason_header` (or `rejected` when there is none). `rejects` names the route hop those readings never reached:
+
+```yaml
+- name: readings the normaliser rejected
+  kind: kafka
+  match: telemetry.dlq
+  device_field: device_id
+  seq_field: seq
+  role: dead-letter
+  rejects: kafka:telemetry.normalized
+  reason_header: dlq_reason
+```
+
+A stop whose readings turn up there is reported as a rejection with its reason, not as lost data.
+
+## Tap health
+
+Every few seconds (`-health-every`, default 5 s) the tap sends one report per hop it watches, as a span with `hopwake.schema` = `tap/v1`:
+
+| Attribute | Meaning |
+| --- | --- |
+| `hopwake.hop` | The hop |
+| `hopwake.tap.id` | Which tap process |
+| `hopwake.tap.connected` | Connected to the source for the whole interval |
+| `hopwake.tap.seen` | Messages read in the interval |
+| `hopwake.tap.missed` | Messages the tap dropped because it could not keep up |
+| `hopwake.tap.delay_ms` | The longest a message waited before the tap read it |
+| `hopwake.tap.every_ms` | The interval; a missing report means the tap was not watching |
+
+The journey service treats a hop as not fully watched while reports say the tap was disconnected, dropped messages or was more than half the grace period behind, and while reports are missing. A stop or silence that such a stretch could explain is reported as waiting for the tap, not as a fault in the pipeline.
 
 ## Window record
 

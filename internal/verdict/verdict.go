@@ -31,7 +31,8 @@ type Journey struct {
 	Seq     uint64    `json:"seq"`
 	First   time.Time `json:"first"`
 	Hops    []HopTime `json:"hops"`
-	Reached int       `json:"reached"` // index in the route of the furthest hop seen, -1 if none
+	Reached int       `json:"reached"`            // index in the route of the furthest hop seen, -1 if none
+	Reason  string    `json:"rejected,omitempty"` // set when a service rejected the reading: why
 }
 
 // Verdict is the answer for one device.
@@ -45,6 +46,9 @@ type Verdict struct {
 	Missing      int           `json:"missing,omitempty"`
 	LastComplete *time.Time    `json:"last_complete,omitempty"`
 	Median       time.Duration `json:"median_ns,omitempty"`
+	Rejected     int           `json:"rejected,omitempty"`   // of Missing, how many a service rejected
+	Reason       string        `json:"reason,omitempty"`     // the most common reason given
+	WaitingOn    string        `json:"waiting_on,omitempty"` // Unsure: the hop the tap did not fully watch
 }
 
 // Decide works out the verdict. Journeys must be newest first. Journeys that
@@ -131,9 +135,43 @@ func Decide(device string, route []string, journeys []Journey, now time.Time, gr
 	}
 	v.StoppedAfter = route[stop]
 	v.NotReached = route[stop+1]
-	v.Sentence = fmt.Sprintf("%s: readings stop after %s. %d readings since %s did not reach %s.",
-		device, route[stop], run, since.Format("15:04:05 MST"), route[stop+1])
+	reasons := map[string]int{}
+	for _, j := range settled[:run] {
+		if j.Reason != "" {
+			v.Rejected++
+			reasons[j.Reason]++
+		}
+	}
+	for r, n := range reasons {
+		if n > reasons[v.Reason] || (n == reasons[v.Reason] && r < v.Reason) {
+			v.Reason = r
+		}
+	}
+	v.Sentence = v.stopSentence(device, "")
 	return v
+}
+
+// stopSentence describes a stop between two hops, naming the service between
+// them when it is known.
+func (v *Verdict) stopSentence(device, service string) string {
+	since := v.Since.Format("15:04:05 MST")
+	if v.Rejected > 0 {
+		who := "a service before " + v.NotReached
+		if service != "" {
+			who = "the " + service
+		}
+		s := fmt.Sprintf("%s: %s rejected %d readings since %s: %s.", device, who, v.Rejected, since, v.Reason)
+		if lost := v.Missing - v.Rejected; lost > 0 {
+			s += fmt.Sprintf(" %d more never arrived at %s.", lost, v.NotReached)
+		}
+		return s
+	}
+	if service != "" {
+		return fmt.Sprintf("%s: readings stop at %s. %d readings since %s reached %s and never arrived at %s.",
+			device, service, v.Missing, since, v.StoppedAfter, v.NotReached)
+	}
+	return fmt.Sprintf("%s: readings stop after %s. %d readings since %s did not reach %s.",
+		device, v.StoppedAfter, v.Missing, since, v.NotReached)
 }
 
 // At names the service between the hop readings reached and the one they
@@ -144,8 +182,7 @@ func (v *Verdict) At(device, service string) {
 		return
 	}
 	v.StoppedAt = service
-	v.Sentence = fmt.Sprintf("%s: readings stop at %s. %d readings since %s reached %s and never arrived at %s.",
-		device, service, v.Missing, v.Since.Format("15:04:05 MST"), v.StoppedAfter, v.NotReached)
+	v.Sentence = v.stopSentence(device, service)
 }
 
 // Quick judges a device from only the last time each hop saw it, which is
@@ -186,6 +223,8 @@ type Event struct {
 	Seq       uint64
 	Hop       string
 	At        time.Time
+	Op        string // "drop" marks a rejection
+	Reason    string
 }
 
 // Assemble groups hop events into journeys, newest first. Events that share a
@@ -203,11 +242,21 @@ func Assemble(events []Event, maxSpan time.Duration) []Journey {
 	var out []Journey
 	for _, e := range sorted {
 		n := len(out)
+		if e.Op == "drop" && e.Reason == "" {
+			e.Reason = "rejected"
+		}
 		if n > 0 && out[n-1].ID == e.JourneyID && e.At.Sub(out[n-1].First) <= maxSpan {
 			out[n-1].Hops = append(out[n-1].Hops, HopTime{Hop: e.Hop, At: e.At})
+			if e.Op == "drop" {
+				out[n-1].Reason = e.Reason
+			}
 			continue
 		}
-		out = append(out, Journey{ID: e.JourneyID, Seq: e.Seq, First: e.At, Hops: []HopTime{{Hop: e.Hop, At: e.At}}})
+		j := Journey{ID: e.JourneyID, Seq: e.Seq, First: e.At, Hops: []HopTime{{Hop: e.Hop, At: e.At}}}
+		if e.Op == "drop" {
+			j.Reason = e.Reason
+		}
+		out = append(out, j)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].First.After(out[j].First) })
 	return out

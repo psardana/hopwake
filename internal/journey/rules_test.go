@@ -1,6 +1,7 @@
 package journey
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -146,5 +147,28 @@ route:
 `))
 	if err == nil || !strings.Contains(err.Error(), "cannot have via") {
 		t.Fatalf("via on the first hop: %v", err)
+	}
+}
+
+func TestDeadLetterSource(t *testing.T) {
+	base := `
+tenant: t
+sources:
+  - {name: a, kind: mqtt, match: a/+, device_from_topic: "a/{device}", seq_field: seq}
+  - {name: b, kind: kafka, match: b, device_field: device, seq_field: seq}
+  - {name: dlq, kind: kafka, match: b.dlq, device_field: device, seq_field: seq, role: dead-letter, rejects: %s, reason_header: why}
+route: [mqtt:a/+, kafka:b]
+`
+	c, err := ParseConfig([]byte(fmt.Sprintf(base, "kafka:b")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := c.DeadLetters(); len(d) != 1 || d[0].HopName() != "kafka:b.dlq" || !d[0].DeadLetter() {
+		t.Fatalf("%+v", d)
+	}
+	for _, bad := range []string{"mqtt:a/+", "kafka:nowhere", `""`} {
+		if _, err := ParseConfig([]byte(fmt.Sprintf(base, bad))); err == nil {
+			t.Errorf("rejects %s was accepted", bad)
+		}
 	}
 }

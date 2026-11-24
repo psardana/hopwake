@@ -77,6 +77,15 @@ def normalise(raw: dict) -> dict:
     }
 
 
+def reason(exc: Exception) -> str:
+    """A short reason for dead letters, e.g. "no field temp_c"."""
+    if isinstance(exc, KeyError) and exc.args:
+        return f"no field {exc.args[0]}"
+    if isinstance(exc, json.JSONDecodeError):
+        return "not JSON"
+    return str(exc) or type(exc).__name__
+
+
 def now() -> bytes:
     return datetime.now(timezone.utc).isoformat().encode()
 
@@ -129,7 +138,7 @@ def main() -> None:
                 except (ValueError, KeyError, TypeError, AttributeError) as exc:
                     span.record_exception(exc)
                     producer.produce(DLQ, key=msg.key(), value=msg.value(),
-                                     headers=tracing.inject(headers) + [("dlq_reason", str(exc).encode()), ("dlq_at", now())])
+                                     headers=tracing.inject(headers) + [("dlq_reason", reason(exc).encode()), ("dlq_at", now())])
                     counts["dlq"] += 1
                 else:
                     producer.produce(TARGET, key=msg.key(), value=json.dumps(out, separators=(",", ":")).encode(),

@@ -92,6 +92,27 @@ type Source struct {
 	DeviceField     string `yaml:"device_field"`
 	SeqField        string `yaml:"seq_field"`
 	BootField       string `yaml:"boot_field"` // optional; every source of a route must agree on it
+
+	// A dead-letter source holds readings a service rejected. Rejects names
+	// the route hop those readings never reached, and ReasonHeader the Kafka
+	// header that says why.
+	Role         string `yaml:"role"` // empty, or "dead-letter"
+	Rejects      string `yaml:"rejects"`
+	ReasonHeader string `yaml:"reason_header"`
+}
+
+// DeadLetter reports whether the source holds rejected readings.
+func (s Source) DeadLetter() bool { return s.Role == "dead-letter" }
+
+// DeadLetters returns the dead-letter sources.
+func (c *Config) DeadLetters() []Source {
+	var out []Source
+	for _, s := range c.Sources {
+		if s.DeadLetter() {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // LoadConfig reads and checks a rules file.
@@ -148,6 +169,18 @@ func (c *Config) check() error {
 		if s.SeqField == "" {
 			return fmt.Errorf("%s: seq_field is required", where)
 		}
+		switch s.Role {
+		case "":
+			if s.Rejects != "" || s.ReasonHeader != "" {
+				return fmt.Errorf("%s: rejects and reason_header need role: dead-letter", where)
+			}
+		case "dead-letter":
+			if s.Kind != "kafka" && s.ReasonHeader != "" {
+				return fmt.Errorf("%s: reason_header only applies to kafka sources", where)
+			}
+		default:
+			return fmt.Errorf("%s: role must be empty or dead-letter, not %q", where, s.Role)
+		}
 	}
 	known := map[string]bool{}
 	for _, s := range c.Sources {
@@ -166,6 +199,20 @@ func (c *Config) check() error {
 			return fmt.Errorf("route: %q appears twice", h)
 		}
 		seen[h] = true
+	}
+	for _, s := range c.DeadLetters() {
+		if seen[s.HopName()] {
+			return fmt.Errorf("route: %q is a dead-letter source and cannot be a hop of the route", s.HopName())
+		}
+		i := -1
+		for k, st := range c.Route {
+			if st.Hop == s.Rejects {
+				i = k
+			}
+		}
+		if i < 1 {
+			return fmt.Errorf("source %s: rejects must name a route hop after the first, not %q", s.Name, s.Rejects)
+		}
 	}
 	return nil
 }

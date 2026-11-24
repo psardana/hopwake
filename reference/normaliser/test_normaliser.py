@@ -2,7 +2,7 @@ import unittest
 
 import random
 
-from normaliser import Faults, normalise
+from normaliser import Faults, normalise, reason
 
 RAW = {"device_id": "dev-00042", "site": "site-02", "seq": 3, "ts": "2026-11-18T06:38:18Z",
        "temp_c": 20.0, "pressure_kpa": 101.0, "vibration_mm_s": 1.0}
@@ -23,8 +23,9 @@ class FaultsTest(unittest.TestCase):
         changed = f.apply(RAW)
         self.assertNotIn("temp_c", changed)
         self.assertIn("temp_c", RAW, "the original reading is left as it was")
-        with self.assertRaises(KeyError):
+        with self.assertRaises(KeyError) as ctx:
             normalise(changed)
+        self.assertEqual(reason(ctx.exception), "no field temp_c")
 
 
 class NormaliseTest(unittest.TestCase):
