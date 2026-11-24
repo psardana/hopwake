@@ -53,6 +53,24 @@ services:
     depends_on:
       - collector
 
+  # Turns spans from services that already trace into hop events.
+  ingest:
+    build:
+      context: ..
+      dockerfile: deploy/go.Dockerfile
+      args:
+        CMD: ingest
+    environment:
+      INGEST_RULES: /etc/hopwake/journey-rules.yaml
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
+    volumes:
+      - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
+      - ../reference/schemas:/etc/hopwake/schemas:ro
+    ports:
+      - "4319:4319"
+    depends_on:
+      - collector
+
   journey:
     build:
       context: ..
