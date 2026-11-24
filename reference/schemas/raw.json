@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hopwake.example/reference/raw.json",
+  "title": "Raw reading, as devices publish it",
+  "type": "object",
+  "required": ["device_id", "site", "seq", "ts", "temp_c", "pressure_kpa", "vibration_mm_s"],
+  "properties": {
+    "device_id": {"type": "string", "pattern": "^dev-[0-9]{5}$"},
+    "site": {"type": "string"},
+    "seq": {"type": "integer", "minimum": 0},
+    "ts": {"type": "string", "format": "date-time"},
+    "temp_c": {"type": "number", "minimum": -60, "maximum": 150, "x-unit": "°C"},
+    "pressure_kpa": {"type": "number", "minimum": 0, "maximum": 1000, "x-unit": "kPa"},
+    "vibration_mm_s": {"type": "number", "minimum": 0, "x-unit": "mm/s"}
+  }
+}
