@@ -48,6 +48,11 @@
   .chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 500; background: var(--line2); color: var(--quiet); }
   .chip.bad { background: var(--warn-bg); color: var(--warn); }
   .chip .dot { width: 6px; height: 6px; }
+  .chip.shape { background: var(--accent-bg); color: var(--accent); }
+  .fields { display: flex; flex-direction: column; gap: 2px; font-family: var(--mono); font-size: 12px; }
+  .fields .add { color: var(--ink); }
+  .fields .rem { color: var(--warn); text-decoration: line-through; }
+  .fields .same { color: var(--quiet); }
   h1 { margin: 0; font-size: 20px; font-weight: 500; letter-spacing: -0.01em; }
   .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
   .route { display: flex; overflow-x: auto; padding-bottom: 4px; }
@@ -165,10 +170,10 @@ function renderFleet() {
     : `${devs.length} devices seen in the ${esc(win())} window`;
   $('view').innerHTML = `
     <div><h1>Fleet</h1><p class="quiet" style="margin:6px 0 0">${intro}, judged against the route ${route.map(h => `<span class="mono">${esc(hopShort(h))}</span>`).join(' → ')}.</p></div>
-    <div class="stats">${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
+    <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
     <section class="panel" style="overflow-x:auto" aria-label="Devices">
       ${devs.length ? `<table><thead><tr><th>Device</th><th>State</th>${route.map(h => `<th>Last seen at ${esc(hopShort(h))}</th>`).join('')}</tr></thead><tbody>
-      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected)}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
+      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
       </tbody></table>` : '<div class="empty">No hop events in this window yet. Is the tap running?</div>'}
     </section>`;
   for (const tr of document.querySelectorAll('tbody tr')) tr.onclick = () => location.hash = `#/device/${encodeURIComponent(tr.dataset.d)}`;
@@ -191,6 +196,12 @@ async function renderDevice(device) {
     : v.state === 'silent' && v.since ? `No readings at any hop since ${time(v.since)}.`
     : v.state === 'ok' && v.median_ns ? `Readings reach every hop, ${ms(v.median_ns)} from first to last.`
     : v.sentence;
+  const shapeBy = Object.fromEntries((d.shapes || []).map(x => [x.hop, x]));
+  const listFields = fs => fs.map(f => f.path).join(', ');
+  const changeText = c => [c.removed && c.removed.length ? `${listFields(c.removed)} removed` : '', c.added && c.added.length ? `${listFields(c.added)} added` : '', c.retyped && c.retyped.length ? `${listFields(c.retyped)} changed type` : ''].filter(Boolean).join(', ');
+  // A shape change at or before the stop, within 30 s of it, is the likely cause.
+  const cause = v.state === 'stopped' && v.since ? route.slice(0, stopIdx + 1).map(h => shapeBy[h]).filter(x => x && x.change && Math.abs(new Date(x.current.first) - new Date(v.since)) <= 30000)[0] : null;
+  const fullSentence = cause ? `${sentence} At the same moment its payload changed at ${hopShort(cause.hop)}: ${changeText(cause.change)}.` : sentence;
 
   const hopsHtml = route.map((h, i) => {
     const isStop = i === stopIdx, done = reached >= i;
@@ -200,7 +211,9 @@ async function renderDevice(device) {
     return `<button type="button" class="hop ${i === selHop ? 'sel' : ''}" data-i="${i}">
       <span class="line"><span class="ring" style="background:${fill};box-shadow:inset 0 0 0 1.5px ${ring}${isStop ? ',0 0 0 3px var(--warn-bg)' : ''}"></span>${i < last ? `<span class="bar" style="background:${reached > i && !(isStop) ? 'var(--dot)' : 'var(--off)'}"></span>` : ''}</span>
       <div class="k" style="color:${i > reached && !isStop && reached >= 0 ? 'var(--quiet)' : 'var(--ink)'}">${esc(hopShort(h))}</div>
-      <div class="m mono" title="${esc(h)}">${esc(hopKind(h))} · ${esc(meta)}</div></button>`;
+      <div class="m mono" title="${esc(h)}">${esc(hopKind(h))} · ${esc(meta)}</div>
+      ${shapeBy[h] ? `<div class="m mono" title="shape ${esc(shapeBy[h].current.fingerprint)}">shape ${esc(shapeBy[h].current.fingerprint.slice(0, 6))} · ${(shapeBy[h].current.fields || []).length} fields</div>` : ''}
+      ${shapeBy[h] && shapeBy[h].change ? `<div class="m" style="color:var(--warn)">shape changed ${time(shapeBy[h].current.first)}</div>` : ''}</button>`;
   }).join('');
 
   const cols = `64px 84px repeat(${route.length}, minmax(48px, 1fr))`;
@@ -224,7 +237,7 @@ async function renderDevice(device) {
     <div style="display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap">
       <div style="flex:1 1 400px">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h1 class="mono">${esc(d.device)}</h1>${stateChip(v.state, v.stopped_after, (fleet.devices.find(x => x.device === d.device) || {}).expected)}</div>
-        <p style="margin:6px 0 0;color:${bad ? 'var(--ink)' : 'var(--quiet)'}">${esc(sentence)}</p>
+        <p style="margin:6px 0 0;color:${bad ? 'var(--ink)' : 'var(--quiet)'}">${esc(fullSentence)}</p>
       </div>
       <button class="btn" type="button" id="copyLink">Copy link</button>
     </div>
@@ -251,11 +264,28 @@ async function renderDevice(device) {
           <dt>Readings that got here</dt><dd style="color:${total && reachedHere < total ? 'var(--warn)' : 'inherit'}">${total ? `${reachedHere} of ${total}` : '—'}</dd>
           ${selHop === stopIdx && v.missing ? `<dt>Missing after it</dt><dd style="color:var(--warn)">${v.missing} since ${time(v.since)}</dd>` : ''}
         </dl>
+        ${shapePanel(shapeBy[h])}
         ${selHop === stopIdx && v.not_reached ? `<div class="quiet" style="border-top:1px solid var(--line2);padding-top:12px">Readings reach <span class="mono">${esc(hopShort(h))}</span> and never arrive at <span class="mono">${esc(hopShort(v.not_reached))}</span>. Whatever sits between those two hops is where to look.</div>` : ''}
       </aside>
     </div>`;
   for (const b of document.querySelectorAll('.hop')) b.onclick = () => { selHop = Number(b.dataset.i); renderDevice(device); };
   $('copyLink').onclick = async () => { try { await navigator.clipboard.writeText(location.href); $('copyLink').textContent = 'Copied'; } catch {} };
+}
+
+function shapePanel(x) {
+  if (!x) return '';
+  const cur = x.current.fields || [];
+  const c = x.change;
+  const removed = c && c.removed ? c.removed.map(f => `${f.path}:${f.type}`) : [];
+  const changed = new Set([...(c && c.added ? c.added : []), ...(c && c.retyped ? c.retyped : [])].map(f => `${f.path}:${f.type}`));
+  const lines = [
+    ...removed.map(f => `<span class="rem">− ${esc(f)}</span>`),
+    ...cur.map(f => changed.has(f) ? `<span class="add">+ ${esc(f)}</span>` : `<span class="same">&nbsp; ${esc(f)}</span>`),
+  ];
+  return `<div style="border-top:1px solid var(--line2);padding-top:12px;display:flex;flex-direction:column;gap:8px">
+    <div style="display:flex;justify-content:space-between;gap:8px"><span style="font-weight:500">Payload shape</span><span class="mono quiet">${esc(x.current.fingerprint.slice(0, 6))}</span></div>
+    ${c ? `<div class="quiet">Changed at ${time(x.current.first)}; before that, shape <span class="mono">${esc(x.previous.fingerprint.slice(0, 6))}</span> until ${time(x.previous.last)}.</div>` : `<div class="quiet">One shape in this window, ${x.current.count} readings.</div>`}
+    <div class="fields">${lines.join('')}</div></div>`;
 }
 
 async function route() {
