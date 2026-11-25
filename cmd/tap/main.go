@@ -344,7 +344,21 @@ func main() {
 		}()
 	}
 
+	// A hop's health is reported only once its source has connected the first
+	// time: before that the tap was not running there, which is no news, and
+	// reporting "not connected" would read as a blind tap at every start. A
+	// tap that stops reporting later still shows up as missing reports.
+	started := map[*atomic.Bool]bool{}
 	report := func(hops []string, up *atomic.Bool) {
+		if !started[up] {
+			if !up.Load() {
+				for _, h := range hops {
+					hl.take(h)
+				}
+				return
+			}
+			started[up] = true
+		}
 		for _, h := range hops {
 			x := hl.take(h)
 			downMu.Lock()
