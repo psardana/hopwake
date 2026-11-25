@@ -246,11 +246,13 @@ async function renderDevice(device) {
   const shapeBy = Object.fromEntries((d.shapes || []).map(x => [x.hop, x]));
   const listFields = fs => fs.map(f => f.path).join(', ');
   const changeText = c => [c.removed && c.removed.length ? `${listFields(c.removed)} removed` : '', c.added && c.added.length ? `${listFields(c.added)} added` : '', c.retyped && c.retyped.length ? `${listFields(c.retyped)} changed type` : ''].filter(Boolean).join(', ');
-  // A shape change at or before the stop, within 30 s of it, is the likely cause.
-  const cause = v.state === 'stopped' && v.since ? route.slice(0, stopIdx + 1).map(h => shapeBy[h]).filter(x => x && x.change && Math.abs(new Date(x.current.first) - new Date(v.since)) <= 30000)[0] : null;
-  const broken = (d.hops || []).filter(x => x.invalid > 0).sort((a, b) => route.indexOf(a.hop) - route.indexOf(b.hop))[0];
+  // A shape change at or before the stop, no later than 30 s after it began, is the likely cause.
+  const cause = v.state === 'stopped' && v.since ? route.slice(0, stopIdx + 1).map(h => shapeBy[h]).filter(x => x && x.change && new Date(x.current.first) - new Date(v.since) <= 30000)[0] : null;
+  const together = cause && Math.abs(new Date(cause.current.first) - new Date(v.since)) <= 30000;
+  // Schema breaks at route hops; errors from traced services are not schema breaks.
+  const broken = (d.hops || []).filter(x => x.invalid > 0 && route.includes(x.hop)).sort((a, b) => route.indexOf(a.hop) - route.indexOf(b.hop))[0];
   const schemaText = broken ? ` ${broken.invalid} readings broke the declared schema at ${hopShort(broken.hop)}: ${broken.invalid_reason}.` : '';
-  const fullSentence = (cause ? `${sentence} At the same moment its payload changed at ${hopShort(cause.hop)}: ${changeText(cause.change)}.` : sentence) + schemaText;
+  const fullSentence = (cause ? `${sentence} ${together ? 'At the same moment its' : 'Its'} payload changed at ${hopShort(cause.hop)}${together ? '' : ` at ${time(cause.current.first)}`}: ${changeText(cause.change)}.` : sentence) + schemaText;
 
   const hopsHtml = route.map((h, i) => {
     const isStop = i === stopIdx, done = reached >= i || (optional.has(h) && !!stat[h] && reached >= i - 1);

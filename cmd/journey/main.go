@@ -486,6 +486,12 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		}
 	case verdict.Silent:
 		v.Hold(device, blind[s.rules.Hops()[0]], now, s.grace)
+	case verdict.OK:
+		// Healthy on readings from before the tap went blind: nothing seen
+		// since, so nothing to say until it is back.
+		if b := blind[s.rules.Hops()[0]]; b.Recent(now, s.grace) && len(js) > 0 && js[0].First.Before(b.From) {
+			v.Wait(device, b)
+		}
 	}
 	if len(js) > 50 {
 		js = js[:50]

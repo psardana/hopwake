@@ -103,6 +103,11 @@ func (v *Verdict) Hold(device string, b *Blind, now time.Time, grace time.Durati
 	if !b.Recent(now, grace) || (v.Since != nil && b.Predates(*v.Since, grace)) {
 		return
 	}
+	v.Wait(device, b)
+}
+
+// Wait makes the verdict Unsure because of what the tap missed.
+func (v *Verdict) Wait(device string, b *Blind) {
 	v.State = Unsure
 	v.WaitingOn = b.Hop
 	v.Sentence = fmt.Sprintf("%s: %s; no verdict until it catches up.", device, b.Describe())
