@@ -71,7 +71,7 @@ wait_key
 
 step "3. A declared schema catches what the pipeline lets through"
 wait_for 120 has /api/devices/dev-00045 '"invalid_reason"'
-wait_for 120 has /api/devices/dev-00045 '"state":"ok"'
+wait_for 120 has /api/devices/dev-00045 'reach every hop'
 api /api/devices/dev-00045 | say '
 h=[x for x in d["hops"] if x["invalid"]]
 print("  " + d["verdict"]["sentence"])
