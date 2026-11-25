@@ -89,6 +89,10 @@ func orRoot(path string) string {
 	return path
 }
 
+// New builds a shape from fields found some other way, for example from a
+// Protobuf message's descriptor.
+func New(fields []Field) Shape { return build(fields) }
+
 func build(fields []Field) Shape {
 	sort.Slice(fields, func(i, j int) bool { return fields[i].Path < fields[j].Path })
 	s := Shape{Fields: fields}
