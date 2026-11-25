@@ -181,7 +181,9 @@ func main() {
 				return
 			}
 			w.Tenant, w.Hop, w.Output, w.At = rules.Tenant, src.HopName(), string(payload), time.Now()
-			hl.saw(src.HopName(), delay, rec.RecordWindow(ctx, w) == nil)
+			// An aggregate's record time is its window's event time, not when it
+			// was written, so it says nothing about how far behind the tap is.
+			hl.saw(src.HopName(), 0, rec.RecordWindow(ctx, w) == nil)
 			return
 		}
 		rule, _ := rules.Rule(kind, topic)
