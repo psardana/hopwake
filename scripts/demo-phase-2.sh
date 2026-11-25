@@ -21,7 +21,9 @@ done
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 step() { bold "── $*"; }
-wait_key() { if [ "$PAUSE" = 1 ]; then read -r -p "Press Enter to continue… " _; fi; }
+# DEMO_STEP_GAP=<seconds> holds each step that long when running with --no-pause,
+# for example while recording the demo.
+wait_key() { if [ "$PAUSE" = 1 ]; then read -r -p "Press Enter to continue… " _; elif [ -n "${DEMO_STEP_GAP:-}" ]; then sleep "$DEMO_STEP_GAP"; fi; }
 api() { curl -sf "localhost:8090$1"; }
 say() { python3 -c "import sys,json; d=json.load(sys.stdin); $1"; }
 verdict() { api "/api/devices/$1" | say 'print("  " + d["verdict"]["sentence"])'; }

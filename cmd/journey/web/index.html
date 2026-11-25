@@ -228,7 +228,9 @@ async function renderDevice(device) {
   const reached = settled ? settled.reached : -1;
   const optional = new Set(d.optional || []);
   const stopIdx = v.state === 'stopped' && v.stopped_after ? route.indexOf(v.stopped_after) : -1;
-  if (selHop === null) selHop = stopIdx >= 0 ? stopIdx : last;
+  // A healthy device opens on its last required hop: optional hops happen only on demand.
+  const lastRequired = route.reduce((k, h, i) => (d.optional || []).includes(h) ? k : i, last);
+  if (selHop === null) selHop = stopIdx >= 0 ? stopIdx : lastRequired;
   const stat = Object.fromEntries((d.hops || []).map(h => [h.hop, h]));
   const bad = v.state === 'stopped' || v.state === 'silent';
   // The server's sentence uses the server's clock; say it again in local time.
@@ -321,7 +323,7 @@ async function renderDevice(device) {
           <dt>Readings seen</dt><dd>${s ? s.count : 0}</dd>
           ${s && s.counted ? `<dt>Counted, all traffic</dt><dd title="hop events are sampled; counters cover every message, in five-minute buckets">${s.counted}</dd>` : ''}
           <dt>Last seen</dt><dd>${s ? time(s.last_seen) : '—'}</dd>
-          <dt>Readings that got here</dt><dd style="color:${total && reachedHere < total ? 'var(--warn)' : 'inherit'}">${total ? `${reachedHere} of ${total}` : '—'}</dd>
+          <dt>Readings that got here</dt><dd style="color:${total && reachedHere < total && !(d.optional || []).includes(h) ? 'var(--warn)' : 'inherit'}">${total ? `${reachedHere} of ${total}` : '—'}</dd>
           ${selHop === stopIdx && v.missing ? `<dt>Missing after it</dt><dd style="color:var(--warn)">${v.missing} since ${time(v.since)}</dd>` : ''}
           ${s && s.invalid ? `<dt>Broke the declared schema</dt><dd style="color:var(--warn)">${s.invalid}</dd><dt>Latest reason</dt><dd class="mono" style="color:var(--warn)">${esc(s.invalid_reason)}</dd>` : ''}
           ${selHop === stopIdx && v.rejected ? `<dt>Rejected by the ${esc(v.stopped_at || 'next service')}</dt><dd style="color:var(--warn)">${v.rejected}</dd><dt>Reason</dt><dd class="mono" style="color:var(--warn)">${esc(v.reason)}</dd>` : ''}
