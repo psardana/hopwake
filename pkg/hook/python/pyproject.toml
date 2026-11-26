@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hopwake-hook"
+version = "0.1.0"
+description = "Marks readings at hops a Hopwake tap cannot watch"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+classifiers = [
+    "Private :: Do Not Upload",
+    "Programming Language :: Python :: 3",
+]
+
+[tool.setuptools]
+packages = ["hopwake_hook"]
