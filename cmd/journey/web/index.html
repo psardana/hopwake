@@ -49,6 +49,8 @@
   .chip.bad { background: var(--warn-bg); color: var(--warn); }
   .chip .dot { width: 6px; height: 6px; }
   .chip.shape { background: var(--accent-bg); color: var(--accent); }
+  button.routechip { border: 1px solid var(--line); background: var(--panel); cursor: pointer; font: inherit; }
+  button.routechip.on { border-color: var(--accent); color: var(--accent); }
   .fields { display: flex; flex-direction: column; gap: 2px; font-family: var(--mono); font-size: 12px; }
   .fields .add { color: var(--ink); }
   .fields .rem { color: var(--warn); text-decoration: line-through; }
@@ -68,7 +70,8 @@
   .ring { width: 9px; height: 9px; border-radius: 50%; flex: none; }
   .grid { overflow-x: auto; }
   .grow { display: grid; align-items: center; height: 30px; border-top: 1px solid var(--line2); }
-  .grow.head { height: 28px; color: var(--quiet); font-size: 11px; border-top-color: var(--line); }
+  .grow.head { height: auto; min-height: 28px; padding: 4px 0; line-height: 1.25; color: var(--quiet); font-size: 11px; border-top-color: var(--line); }
+  .grow.head > span { overflow-wrap: break-word; }
   .grow.pick { cursor: pointer; }
   .grow.pick:hover, .grow.pick.on { background: var(--line2); }
   pre.payload { margin: 4px 0 0; padding: 8px; border-radius: 6px; background: var(--side); font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; }
@@ -137,8 +140,16 @@ const ago = iso => { const s = Math.max(0, Math.round((Date.now() - new Date(iso
 const ms = ns => ns >= 1e9 ? `${(ns / 1e9).toFixed(1)} s` : `${Math.round(ns / 1e6)} ms`;
 const hopKind = h => h.split(':')[0];
 const hopWhere = h => h.slice(h.indexOf(':') + 1);
-const hopShort = h => { const w = hopWhere(h); return hopKind(h) === 'mqtt' ? 'MQTT' : w.split('.').pop(); };
-let fleet = null, current = null, selHop = null, timer = null, selJourney = null;
+// A hop's short name: MQTT, or the part of a topic that tells it apart
+// ("telemetry.raw" → raw, "ems.measurements.raw" → measurements).
+const hopShort = h => {
+  if (hopKind(h) === 'mqtt') return 'MQTT';
+  if (hopKind(h) === 'hook') return hopWhere(h);
+  const parts = hopWhere(h).split('.');
+  return parts.length >= 3 ? parts.slice(1, -1).join('.') : parts.pop();
+};
+const typeShort = t => (t || '').split('.').pop();
+let fleet = null, current = null, selHop = null, timer = null, selJourney = null, selRoute = null, shownRoute = null;
 const journeyCache = {};
 
 // Theme: follows the system; a manual choice is remembered in this browser.
@@ -194,6 +205,15 @@ async function loadFleet() {
   $('deviceList').innerHTML = fleet.devices.map(d => `<option value="${esc(d.device)}">`).join('');
 }
 
+// How the fleet is judged: one route, or one route per kind of message.
+function routeWords() {
+  const line = hops => hops.map(h => `<span class="mono">${esc(hopShort(h))}</span>`).join(' → ');
+  const rs = fleet.routes || [];
+  if (rs.length < 2) return `judged against the route ${line(fleet.route)}`;
+  return `judged on ${rs.length} routes by message type, each device by its worst: ` +
+    rs.map(r => `<b>${esc(r.name)}</b> ${line(r.hops)}`).join('; ');
+}
+
 function renderFleet() {
   $('navFleet').classList.add('on');
   $('navMappings').classList.remove('on');
@@ -205,7 +225,7 @@ function renderFleet() {
     ? `${n('ok')} of ${fleet.expected} expected devices are healthy in the ${esc(win())} window`
     : `${devs.length} devices seen in the ${esc(win())} window`;
   $('view').innerHTML = `
-    <div><h1>Fleet</h1><p class="quiet" style="margin:6px 0 0">${intro}, judged against the route ${route.map(h => `<span class="mono">${esc(hopShort(h))}</span>`).join(' → ')}.</p></div>
+    <div><h1>Fleet</h1><p class="quiet" style="margin:6px 0 0">${intro}, ${routeWords()}.</p></div>
     ${(fleet.tap || []).length ? `<p class="quiet" style="margin:0">${esc(tapSummary(fleet.tap, route))} Verdicts that depend on ${fleet.tap.length > 1 ? 'those hops' : 'that hop'} wait until it catches up.</p>` : ''}
     <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${devs.some(d => d.invalid) ? `<span class="chip bad">${devs.filter(d => d.invalid).length} breaking a schema</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${n('unsure') ? `<span class="chip">${n('unsure')} waiting for the tap</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
     <section class="panel" style="overflow-x:auto" aria-label="Devices">
@@ -220,8 +240,10 @@ async function renderDevice(device) {
   $('navFleet').classList.remove('on');
   $('navMappings').classList.remove('on');
   $('navAggregates').classList.remove('on');
-  const d = await get(`/api/devices/${encodeURIComponent(device)}?window=${win()}`);
+  if (current !== device) { selRoute = null; }
+  const d = await get(`/api/devices/${encodeURIComponent(device)}?window=${win()}${selRoute ? `&route=${encodeURIComponent(selRoute)}` : ''}`);
   if (current !== device) { selHop = null; selJourney = null; current = device; remember(device); }
+  if (shownRoute !== d.route_name) { selHop = null; shownRoute = d.route_name; }
   if (selJourney) { try { journeyCache[selJourney] = await get(`/api/journeys/${selJourney}`); } catch { selJourney = null; } }
   const v = d.verdict, route = d.route, last = route.length - 1;
   const settled = d.journeys.find(j => Date.now() - new Date(j.first) >= 15000);
@@ -270,12 +292,14 @@ async function renderDevice(device) {
       ${shapeBy[h] && shapeBy[h].change ? `<div class="m" style="color:var(--warn)">shape changed ${time(shapeBy[h].current.first)}</div>` : ''}</button>`;
   }).join('');
 
-  const cols = `64px 84px repeat(${route.length}, minmax(48px, 1fr))`;
+  // Readings numbered by their timestamp carry a message type instead of a sequence number.
+  const typed = d.journeys.some(j => j.type);
+  const cols = `${typed ? '128px' : '64px'} 72px repeat(${route.length}, minmax(48px, 1fr))`;
   const rows = d.journeys.slice(0, 14).map(j => {
     const at = new Set(j.hops.map(h => h.hop));
     const young = Date.now() - new Date(j.first) < 15000;
     return `<div class="grow pick${j.journey_id === selJourney ? ' on' : ''}" style="grid-template-columns:${cols}" data-j="${esc(j.journey_id)}" title="journey ${esc(j.journey_id)}">
-      <span class="mono" style="padding-left:14px">${j.seq}</span><span class="mono quiet">${time(j.first)}</span>
+      <span class="mono" style="padding-left:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(j.type || '')}">${typed ? esc(typeShort(j.type) || '—') : j.seq}</span><span class="mono quiet">${time(j.first)}</span>
       ${route.map((h, i) => {
         const hit = at.has(h);
         const missing = !hit && !young && i === j.reached + 1 && !optional.has(h);
@@ -302,9 +326,13 @@ async function renderDevice(device) {
       </div>
     </div>
     ${d.watch ? `<p class="quiet" style="margin:-8px 0 0">Watching since ${time(d.watch.since)} until ${time(d.watch.until)}: full payloads at every hop, redacted in the tap and kept 24 hours. Pick a reading to see them.</p>` : ''}
+    ${(d.routes || []).length > 1 ? `<div class="row" role="tablist" aria-label="Routes by message type" style="display:flex;gap:8px;flex-wrap:wrap">${d.routes.map(r => {
+      const badRoute = ['stopped', 'silent'].includes(r.verdict.state);
+      return `<button type="button" class="chip routechip${r.name === d.route_name ? ' on' : ''}" data-r="${esc(r.name)}" title="${esc((r.types || []).join(', ') || 'every type')}"><span class="dot${badRoute ? ' bad' : ''}"></span>${esc(r.name)} · ${r.readings} ${r.readings === 1 ? 'reading' : 'readings'}</button>`;
+    }).join('')}</div>` : ''}
     <section aria-label="Route">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;color:var(--quiet);font-size:12px;font-weight:500;margin-bottom:8px">
-        <span>Route · ${route.length} hops</span>
+        <span>${(d.routes || []).length > 1 ? `Route ${esc(d.route_name)}` : 'Route'} · ${route.length} hops</span>
         <span>${v.last_complete ? `Last complete journey ${time(v.last_complete)}` : 'No complete journey in this window'}${v.median_ns ? ` · ${ms(v.median_ns)} first to last hop` : ''}</span>
       </div>
       <div class="route">${hopsHtml}</div>
@@ -312,7 +340,7 @@ async function renderDevice(device) {
     <div class="split">
       <section class="panel grid" style="flex:999 1 520px;min-width:0" aria-label="Recent readings">
         <div style="display:flex;justify-content:space-between;padding:12px 14px;font-weight:500"><span>Recent readings</span><span class="quiet" style="font-weight:400">each row is one reading</span></div>
-        <div class="grow head" style="grid-template-columns:${cols}"><span style="padding-left:14px">Seq</span><span>Sent</span>${route.map(h => `<span style="text-align:center">${esc(hopShort(h))}</span>`).join('')}</div>
+        <div class="grow head" style="grid-template-columns:${cols}"><span style="padding-left:14px">${typed ? 'Message type' : 'Seq'}</span><span>Sent</span>${route.map(h => `<span style="text-align:center">${esc(hopShort(h)).replace(/([.-])/g, '$1<wbr>')}</span>`).join('')}</div>
         ${rows || '<div class="empty">No readings in this window.</div>'}
       </section>
       ${selJourney && journeyCache[selJourney] ? readingPanel(journeyCache[selJourney], route) : `<aside class="panel" style="flex:1 1 280px;padding:16px;display:flex;flex-direction:column;gap:14px" aria-label="Hop detail">
@@ -333,6 +361,7 @@ async function renderDevice(device) {
       </aside>`}
     </div>
     ${aggregatesPanel(d)}`;
+  for (const b of document.querySelectorAll('.routechip')) b.onclick = () => { selRoute = b.dataset.r; selHop = null; selJourney = null; renderDevice(device); };
   for (const b of document.querySelectorAll('.hop')) b.onclick = () => { selHop = Number(b.dataset.i); selJourney = null; renderDevice(device); };
   for (const r of document.querySelectorAll('.grow.pick')) r.onclick = () => { selJourney = selJourney === r.dataset.j ? null : r.dataset.j; renderDevice(device); };
   if ($('closeReading')) $('closeReading').onclick = () => { selJourney = null; renderDevice(device); };

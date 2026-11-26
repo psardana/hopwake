@@ -175,3 +175,25 @@ func TestRejectionsNameTheReason(t *testing.T) {
 		t.Fatalf("sentence %q", v.Sentence)
 	}
 }
+
+func TestUnreadableReadingsExplainTheStop(t *testing.T) {
+	now := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	route := []string{"mqtt", "raw", "stored"}
+	var ev []Event
+	for i := 0; i < 3; i++ {
+		at := now.Add(-time.Duration(30+i) * time.Second)
+		id := fmt.Sprintf("j%d", i)
+		why := "unknown message type m.ReadingV2"
+		ev = append(ev, Event{JourneyID: id, Hop: "mqtt", At: at, Op: "error", Reason: why},
+			Event{JourneyID: id, Hop: "raw", At: at.Add(time.Millisecond), Op: "error", Reason: why})
+	}
+	v := Decide("d", route, Assemble(ev, time.Minute), now, 15*time.Second, nil)
+	v.At("d", "store-service")
+	if v.Unreadable != 3 || v.Rejected != 0 {
+		t.Fatalf("%+v", v)
+	}
+	want := "readings stop at store-service. 3 readings since 11:59:28 UTC reached raw and never arrived at stored. They could not be read at raw: unknown message type m.ReadingV2."
+	if !strings.Contains(v.Sentence, want) {
+		t.Fatalf("sentence %q", v.Sentence)
+	}
+}

@@ -34,6 +34,7 @@ type Journey struct {
 	Reached int               `json:"reached"`            // index in the route of the furthest hop seen, -1 if none
 	Reason  string            `json:"rejected,omitempty"` // set when a service rejected the reading: why
 	Invalid map[string]string `json:"invalid,omitempty"`  // hops where the reading broke the declared schema, with why
+	Type    string            `json:"type,omitempty"`     // the message type, for sources that name one
 }
 
 // Verdict is the answer for one device.
@@ -49,6 +50,8 @@ type Verdict struct {
 	Median       time.Duration `json:"median_ns,omitempty"`
 	Rejected     int           `json:"rejected,omitempty"`   // of Missing, how many a service rejected
 	Reason       string        `json:"reason,omitempty"`     // the most common reason given
+	Unreadable   int           `json:"unreadable,omitempty"` // of Missing, how many broke their schema at the last hop they reached
+	Why          string        `json:"why,omitempty"`        // the most common schema break among them
 	WaitingOn    string        `json:"waiting_on,omitempty"` // Unsure: the hop the tap did not fully watch
 }
 
@@ -148,6 +151,20 @@ func Decide(device string, route []string, journeys []Journey, now time.Time, gr
 			v.Reason = r
 		}
 	}
+	// Readings that could not be read where they stopped (a schema break,
+	// a payload that does not decode) explain why the next service lost them.
+	whys := map[string]int{}
+	for _, j := range settled[:run] {
+		if why, ok := j.Invalid[v.StoppedAfter]; ok && j.Reason == "" {
+			v.Unreadable++
+			whys[why]++
+		}
+	}
+	for r, n := range whys {
+		if n > whys[v.Why] || (n == whys[v.Why] && r < v.Why) {
+			v.Why = r
+		}
+	}
 	v.Sentence = v.stopSentence(device, "")
 	return v
 }
@@ -167,12 +184,20 @@ func (v *Verdict) stopSentence(device, service string) string {
 		}
 		return s
 	}
+	s := fmt.Sprintf("%s: readings stop after %s. %d readings since %s did not reach %s.",
+		device, v.StoppedAfter, v.Missing, since, v.NotReached)
 	if service != "" {
-		return fmt.Sprintf("%s: readings stop at %s. %d readings since %s reached %s and never arrived at %s.",
+		s = fmt.Sprintf("%s: readings stop at %s. %d readings since %s reached %s and never arrived at %s.",
 			device, service, v.Missing, since, v.StoppedAfter, v.NotReached)
 	}
-	return fmt.Sprintf("%s: readings stop after %s. %d readings since %s did not reach %s.",
-		device, v.StoppedAfter, v.Missing, since, v.NotReached)
+	if v.Unreadable > 0 {
+		which := fmt.Sprintf("%d of them", v.Unreadable)
+		if v.Unreadable == v.Missing {
+			which = "They"
+		}
+		s += fmt.Sprintf(" %s could not be read at %s: %s.", which, v.StoppedAfter, v.Why)
+	}
+	return s
 }
 
 // At names the service between the hop readings reached and the one they
@@ -226,6 +251,7 @@ type Event struct {
 	At        time.Time
 	Op        string // "drop" marks a rejection, "error" a reading that broke a declared schema
 	Reason    string
+	Type      string // the message type, when the source names one
 }
 
 // Assemble groups hop events into journeys, newest first. Events that share a
@@ -252,6 +278,9 @@ func Assemble(events []Event, maxSpan time.Duration) []Journey {
 		}
 		j := &out[n-1]
 		j.Hops = append(j.Hops, HopTime{Hop: e.Hop, At: e.At})
+		if j.Type == "" {
+			j.Type = e.Type
+		}
 		switch e.Op {
 		case "drop":
 			j.Reason = e.Reason

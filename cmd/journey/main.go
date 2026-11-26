@@ -23,6 +23,7 @@ import (
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 
+	"github.com/psardana/hopwake/internal/alias"
 	"github.com/psardana/hopwake/internal/fleet"
 	"github.com/psardana/hopwake/internal/journey"
 	"github.com/psardana/hopwake/internal/shape"
@@ -43,13 +44,17 @@ var schema = []string{
 		correlation LowCardinality(String),
 		bytes UInt32,
 		schema_fp LowCardinality(String),
-		reason String
+		reason String,
+		message_type LowCardinality(String),
+		alias String
 	) ENGINE = MergeTree
 	ORDER BY (tenant, device, ts)
 	TTL toDateTime(ts) + INTERVAL 3 DAY`,
 	// Stores created by hop/v0 lack the shape column.
 	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS schema_fp LowCardinality(String)`,
 	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS reason String`,
+	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS message_type LowCardinality(String)`,
+	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS alias String`,
 	// The view is replaced on every start so that it always matches this code.
 	`DROP VIEW IF EXISTS hop_events_mv`,
 	`CREATE MATERIALIZED VIEW hop_events_mv TO hop_events AS
@@ -64,7 +69,9 @@ var schema = []string{
 		SpanAttributes['hopwake.correlation'] AS correlation,
 		toUInt32OrZero(SpanAttributes['hopwake.payload.bytes']) AS bytes,
 		SpanAttributes['hopwake.schema.fp'] AS schema_fp,
-		SpanAttributes['hopwake.reason'] AS reason
+		SpanAttributes['hopwake.reason'] AS reason,
+		SpanAttributes['hopwake.message.type'] AS message_type,
+		SpanAttributes['hopwake.device.alias'] AS alias
 	FROM otel_traces
 	WHERE SpanAttributes['hopwake.schema'] IN ('hop/v0', 'hop/v1')`,
 	// One row per shape per hop and tap start: the fields arrive with the first
@@ -243,8 +250,13 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if len(rules.Route) < 2 {
-		log.Fatal("the rules file needs a route of at least two hops")
+	for _, rt := range rules.AllRoutes() {
+		if len(rt.Steps) < 2 {
+			log.Fatalf("route %s needs at least two hops", rt.Name)
+		}
+	}
+	if len(rules.AllRoutes()) == 0 {
+		log.Fatal("the rules file needs a route: route, or routes by message type")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -284,6 +296,7 @@ func main() {
 	mux.HandleFunc("GET /api/devices/{device}", s.device)
 	mux.HandleFunc("GET /api/journeys/{id}", s.journey)
 	mux.HandleFunc("GET /api/watches", s.watches)
+	mux.HandleFunc("GET /api/aliases", s.aliases)
 	mux.HandleFunc("GET /api/mappings", s.mappings)
 	mux.HandleFunc("GET /api/windows", s.windows)
 	mux.HandleFunc("GET /api/windows/{key}/{start}", s.windowDetail)
@@ -369,7 +382,7 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	from := now.Add(-window)
 
 	rows, err := s.db.Query(ctx, `
-		SELECT journey_id, seq, hop, ts, op, reason
+		SELECT journey_id, seq, hop, ts, op, reason, message_type
 		FROM hop_events
 		WHERE tenant = ? AND device = ? AND ts >= ?
 		ORDER BY ts DESC
@@ -381,7 +394,7 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	var events []verdict.Event
 	for rows.Next() {
 		var e verdict.Event
-		if err := rows.Scan(&e.JourneyID, &e.Seq, &e.Hop, &e.At, &e.Op, &e.Reason); err != nil {
+		if err := rows.Scan(&e.JourneyID, &e.Seq, &e.Hop, &e.At, &e.Op, &e.Reason, &e.Type); err != nil {
 			httpError(w, err)
 			return
 		}
@@ -472,27 +485,67 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		watching = &ws[0]
 	}
 
-	v := verdict.Decide(device, s.rules.RequiredHops(), js, now, s.grace, lastSeen)
-	v.At(device, s.rules.Via(v.NotReached))
 	blind, err := s.blindness(ctx, from, now)
 	if err != nil {
 		httpError(w, err)
 		return
 	}
-	switch v.State {
-	case verdict.Stopped:
-		if v.NotReached != "" {
-			v.Hold(device, blind[v.NotReached], now, s.grace)
+	// One verdict per route: a reading is judged on the routes its message
+	// type follows. The page shows one route at a time, by default the first
+	// with a problem.
+	type routeView struct {
+		Name     string          `json:"name"`
+		Types    []string        `json:"types,omitempty"`
+		Readings int             `json:"readings"`
+		Verdict  verdict.Verdict `json:"verdict"`
+	}
+	var views []routeView
+	subsets := map[string][]verdict.Journey{}
+	routes := s.rules.AllRoutes()
+	for _, rt := range routes {
+		var sub []verdict.Journey
+		for _, j := range js {
+			for _, r := range s.rules.RoutesFor(j.Type) {
+				if r.Name == rt.Name {
+					sub = append(sub, j)
+					break
+				}
+			}
 		}
-	case verdict.Silent:
-		v.Hold(device, blind[s.rules.Hops()[0]], now, s.grace)
-	case verdict.OK:
-		// Healthy on readings from before the tap went blind: nothing seen
-		// since, so nothing to say until it is back.
-		if b := blind[s.rules.Hops()[0]]; b.Recent(now, s.grace) && len(js) > 0 && js[0].First.Before(b.From) {
-			v.Wait(device, b)
+		subsets[rt.Name] = sub
+		views = append(views, routeView{Name: rt.Name, Types: rt.Types, Readings: len(sub), Verdict: s.judge(device, rt, sub, now, lastSeen, blind)})
+	}
+	sel := -1
+	if q := r.URL.Query().Get("route"); q != "" {
+		for i, v := range views {
+			if v.Name == q {
+				sel = i
+			}
 		}
 	}
+	if sel < 0 {
+		for i, v := range views {
+			if v.Readings > 0 && v.Verdict.State != verdict.OK && sel < 0 {
+				sel = i
+			}
+		}
+	}
+	if sel < 0 {
+		for i, v := range views {
+			if sel < 0 || v.Readings > views[sel].Readings {
+				sel = i
+			}
+		}
+	}
+	shown := []routeView{}
+	for _, v := range views {
+		if v.Readings > 0 || len(views) == 1 {
+			shown = append(shown, v)
+		}
+	}
+	rt := routes[sel]
+	v := views[sel].Verdict
+	js = subsets[rt.Name]
 	if len(js) > 50 {
 		js = js[:50]
 	}
@@ -500,9 +553,11 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		"tenant":     tenant,
 		"device":     device,
 		"window":     window.String(),
-		"route":      s.rules.Hops(),
-		"optional":   s.optional(),
-		"via":        s.via(),
+		"route":      rt.Hops(),
+		"route_name": rt.Name,
+		"routes":     shown,
+		"optional":   rt.Optional(),
+		"via":        viaOf(rt),
 		"tap":        blindList(blind),
 		"watch":      watching,
 		"findings":   found,
@@ -533,23 +588,40 @@ type hopShapes struct {
 // it changed in the window, the one before and what moved between them.
 func (s *server) shapeHistory(ctx context.Context, tenant, device string, from time.Time) ([]hopShapes, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT hop, schema_fp, count(), min(ts), max(ts) FROM hop_events
+		SELECT hop, message_type, schema_fp, count(), min(ts), max(ts) FROM hop_events
 		WHERE tenant = ? AND device = ? AND ts >= ? AND schema_fp != ''
-		GROUP BY hop, schema_fp
-		ORDER BY hop, max(ts)`, tenant, device, from)
+		GROUP BY hop, message_type, schema_fp
+		ORDER BY hop, message_type, max(ts)`, tenant, device, from)
 	if err != nil {
 		return nil, err
 	}
-	byHop := map[string][]shapeSeen{}
+	// Each message type has its own shape: only a change within one type is
+	// a change. Per hop, show the type that changed, else the newest.
+	byType := map[string]map[string][]shapeSeen{}
 	var fps []string
 	for rows.Next() {
-		var h string
+		var h, t string
 		var x shapeSeen
-		if err := rows.Scan(&h, &x.Fingerprint, &x.Count, &x.First, &x.Last); err != nil {
+		if err := rows.Scan(&h, &t, &x.Fingerprint, &x.Count, &x.First, &x.Last); err != nil {
 			return nil, err
 		}
-		byHop[h] = append(byHop[h], x)
+		if byType[h] == nil {
+			byType[h] = map[string][]shapeSeen{}
+		}
+		byType[h][t] = append(byType[h][t], x)
 		fps = append(fps, x.Fingerprint)
+	}
+	byHop := map[string][]shapeSeen{}
+	for h, types := range byType {
+		for _, seen := range types {
+			cur, best := seen[len(seen)-1], byHop[h]
+			switch {
+			case best == nil,
+				len(seen) > 1 && len(best) == 1,
+				(len(seen) > 1) == (len(best) > 1) && cur.Last.After(best[len(best)-1].Last):
+				byHop[h] = seen
+			}
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -575,7 +647,7 @@ func (s *server) shapeHistory(ctx context.Context, tenant, device string, from t
 		return x
 	}
 	out := []hopShapes{}
-	for _, h := range s.rules.Hops() {
+	for _, h := range s.allHops() {
 		seen := byHop[h]
 		if len(seen) == 0 {
 			continue
@@ -600,6 +672,7 @@ type fleetDevice struct {
 	State        verdict.State        `json:"state"`
 	StoppedAfter string               `json:"stopped_after,omitempty"`
 	StoppedAt    string               `json:"stopped_at,omitempty"`
+	Route        string               `json:"route,omitempty"`    // the route the state is about
 	Rejected     bool                 `json:"rejected,omitempty"` // the service after StoppedAfter is rejecting its readings
 	LastSeen     map[string]time.Time `json:"last_seen"`
 	LastEver     *time.Time           `json:"last_ever,omitempty"` // for expected devices not seen in the window
@@ -625,39 +698,58 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	// Last sightings from hop events, which may be sampled, and from
 	// counters, which cover all traffic but arrive every few seconds.
+	// Counters carry no message type, so they count only for the untyped route.
 	rows, err := s.db.Query(r.Context(), `
-		SELECT device, hop, max(t) FROM (
-			SELECT device, hop, max(ts) AS t FROM hop_events
+		SELECT device, hop, message_type, max(t) FROM (
+			SELECT device, hop, message_type, max(ts) AS t FROM hop_events
 			WHERE tenant = ? AND ts >= ?
-			GROUP BY device, hop
+			GROUP BY device, hop, message_type
 			UNION ALL
-			SELECT device, hop, toDateTime64(max(last_seen), 9) AS t FROM device_counters
+			SELECT device, hop, ? AS message_type, toDateTime64(max(last_seen), 9) AS t FROM device_counters
 			WHERE tenant = ? AND bucket >= toStartOfFiveMinutes(?) AND last_seen >= ?
 			GROUP BY device, hop)
-		GROUP BY device, hop`, s.rules.Tenant, now.Add(-window), s.rules.Tenant, now.Add(-window), now.Add(-window))
+		GROUP BY device, hop, message_type`, s.rules.Tenant, now.Add(-window), counterType, s.rules.Tenant, now.Add(-window), now.Add(-window))
 	if err != nil {
 		httpError(w, err)
 		return
 	}
-	last := map[string]map[string]time.Time{}
+	last := map[string]map[string]time.Time{}             // device → hop → last seen, any type
+	typed := map[string]map[string]map[string]time.Time{} // device → type → hop → last seen
 	for rows.Next() {
-		var device, hopName string
+		var device, hopName, msgType string
 		var at time.Time
-		if err := rows.Scan(&device, &hopName, &at); err != nil {
+		if err := rows.Scan(&device, &hopName, &msgType, &at); err != nil {
 			httpError(w, err)
 			return
 		}
 		if last[device] == nil {
 			last[device] = map[string]time.Time{}
+			typed[device] = map[string]map[string]time.Time{}
 		}
-		last[device][hopName] = at
+		if at.After(last[device][hopName]) {
+			last[device][hopName] = at
+		}
+		if msgType == counterType {
+			// Counters mix every type: they can stand for the untyped route
+			// only, never for one typed route.
+			if len(s.rules.Route) == 0 {
+				continue
+			}
+			msgType = ""
+		}
+		if typed[device][msgType] == nil {
+			typed[device][msgType] = map[string]time.Time{}
+		}
+		if at.After(typed[device][msgType][hopName]) {
+			typed[device][msgType][hopName] = at
+		}
 	}
 	changed := map[string]bool{}
 	crows, err := s.db.Query(r.Context(), `
 		SELECT DISTINCT device FROM (
-			SELECT device, hop FROM hop_events
+			SELECT device, hop, message_type FROM hop_events
 			WHERE tenant = ? AND ts >= ? AND schema_fp != ''
-			GROUP BY device, hop
+			GROUP BY device, hop, message_type
 			HAVING uniqExact(schema_fp) > 1)`, s.rules.Tenant, now.Add(-window))
 	if err != nil {
 		httpError(w, err)
@@ -719,31 +811,40 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 			wrong[wd.Device] += f.Broken
 		}
 	}
-	hops := s.rules.RequiredHops()
-	for device, seen := range last {
-		state, after := verdict.Quick(hops, seen, now, s.grace, s.grace+45*time.Second)
-		// A stop just before a hop the tap was not watching, or silence while it
-		// was not watching the first hop, may be the tap's own doing.
-		depends := hops[0]
-		if state == verdict.Stopped && after != "" {
-			for i := 0; i+1 < len(hops); i++ {
-				if hops[i] == after {
-					depends = hops[i+1]
+	routes := s.rules.AllRoutes()
+	for device, all := range last {
+		// Judge each route on the readings whose types follow it, and show
+		// the worst.
+		best := fleetDevice{Device: device, State: verdict.Unknown}
+		for _, rt := range routes {
+			seen := map[string]time.Time{}
+			for msgType, hops := range typed[device] {
+				follows := false
+				for _, r := range s.rules.RoutesFor(msgType) {
+					if r.Name == rt.Name {
+						follows = true
+					}
+				}
+				if !follows {
+					continue
+				}
+				for h, at := range hops {
+					if at.After(seen[h]) {
+						seen[h] = at
+					}
 				}
 			}
+			if len(seen) == 0 {
+				continue
+			}
+			fd := s.quick(device, rt, seen, now, blind)
+			if best.State == verdict.Unknown || order[fd.State] < order[best.State] {
+				best = fd
+			}
 		}
-		// The hop's last sighting of the device; a stop or silence that began
-		// before the tap went blind stands.
-		lastAt := seen[depends]
-		if state == verdict.Silent {
-			lastAt = seen[hops[0]]
-		}
-		if b := blind[depends]; (state == verdict.Stopped || state == verdict.Silent) && b.Recent(now, s.grace) && !b.Predates(lastAt, s.grace) {
-			state = verdict.Unsure
-		}
-		out = append(out, fleetDevice{Device: device, State: state, StoppedAfter: after, StoppedAt: s.serviceAfter(after), Rejected: state == verdict.Stopped && s.rejectedAfter(after, seen),
-			LastSeen: seen, Expected: expected[device], ShapeChanged: changed[device], Invalid: invalid[device],
-			WrongValues: wrong[device], Watched: watchedNow[device]})
+		best.LastSeen, best.Expected, best.ShapeChanged, best.Invalid = all, expected[device], changed[device], invalid[device]
+		best.WrongValues, best.Watched = wrong[device], watchedNow[device]
+		out = append(out, best)
 	}
 
 	// Expected devices with nothing in the window: silent if ever seen, else never seen.
@@ -785,7 +886,16 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].Device < out[j].Device
 	})
-	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "optional": s.optional(), "via": s.via(), "tap": blindList(blind), "window": window.String(), "expected": len(s.expected), "devices": out})
+	type routeHops struct {
+		Name  string   `json:"name"`
+		Types []string `json:"types,omitempty"`
+		Hops  []string `json:"hops"`
+	}
+	var rs []routeHops
+	for _, rt := range s.rules.AllRoutes() {
+		rs = append(rs, routeHops{Name: rt.Name, Types: rt.Types, Hops: rt.Hops()})
+	}
+	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "routes": rs, "optional": s.optional(), "via": s.via(), "tap": blindList(blind), "window": window.String(), "expected": len(s.expected), "devices": out})
 }
 
 func (s *server) journey(w http.ResponseWriter, r *http.Request) {
@@ -823,6 +933,65 @@ func (s *server) journey(w http.ResponseWriter, r *http.Request) {
 		out = append(out, x)
 	}
 	writeJSON(w, map[string]any{"journey_id": id, "route": s.rules.Hops(), "via": s.via(), "hops": out})
+}
+
+// aliases lists the other names devices go by, as learned at hops that
+// know both: taps and hooks further down resolve them back to the device.
+func (s *server) aliases(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(r.Context(), `
+		SELECT alias, argMax(device, ts) FROM hop_events
+		WHERE tenant = ? AND alias != ''
+		GROUP BY alias`, s.rules.Tenant)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+	defer rows.Close()
+	out := []alias.Pair{}
+	for rows.Next() {
+		var a, device string
+		if err := rows.Scan(&a, &device); err != nil {
+			httpError(w, err)
+			return
+		}
+		if kind, value, ok := alias.Parse(a); ok {
+			out = append(out, alias.Pair{Kind: kind, Value: value, Device: device})
+		}
+	}
+	writeJSON(w, out)
+}
+
+// judge works out one route's verdict for a device.
+func (s *server) judge(device string, rt journey.TypedRoute, js []verdict.Journey, now time.Time, lastSeen *verdict.HopTime, blind map[string]*verdict.Blind) verdict.Verdict {
+	hops := rt.Hops()
+	v := verdict.Decide(device, rt.RequiredHops(), js, now, s.grace, lastSeen)
+	v.At(device, viaOf(rt)[v.NotReached])
+	switch v.State {
+	case verdict.Stopped:
+		if v.NotReached != "" {
+			v.Hold(device, blind[v.NotReached], now, s.grace)
+		}
+	case verdict.Silent:
+		v.Hold(device, blind[hops[0]], now, s.grace)
+	case verdict.OK:
+		// Healthy on readings from before the tap went blind: nothing seen
+		// since, so nothing to say until it is back.
+		if b := blind[hops[0]]; b.Recent(now, s.grace) && len(js) > 0 && js[0].First.Before(b.From) {
+			v.Wait(device, b)
+		}
+	}
+	return v
+}
+
+// viaOf maps each hop of a route to the service that carries readings to it.
+func viaOf(rt journey.TypedRoute) map[string]string {
+	out := map[string]string{}
+	for _, st := range rt.Steps {
+		if st.Via != "" {
+			out[st.Hop] = st.Via
+		}
+	}
+	return out
 }
 
 // optional lists the route's optional hops.
@@ -891,6 +1060,62 @@ func blindList(m map[string]*verdict.Blind) []*verdict.Blind {
 	sort.Slice(out, func(i, j int) bool { return out[i].Hop < out[j].Hop })
 	return out
 }
+
+// quick judges one route of one device from its last sightings.
+func (s *server) quick(device string, rt journey.TypedRoute, seen map[string]time.Time, now time.Time, blind map[string]*verdict.Blind) fleetDevice {
+	hops := rt.RequiredHops()
+	state, after := verdict.Quick(hops, seen, now, s.grace, s.grace+45*time.Second)
+	// A stop just before a hop the tap was not watching, or silence while it
+	// was not watching the first hop, may be the tap's own doing.
+	depends, next := hops[0], ""
+	if state == verdict.Stopped && after != "" {
+		for i := 0; i+1 < len(hops); i++ {
+			if hops[i] == after {
+				depends, next = hops[i+1], hops[i+1]
+			}
+		}
+	}
+	// The hop's last sighting of the device; a stop or silence that began
+	// before the tap went blind stands.
+	lastAt := seen[depends]
+	if state == verdict.Silent {
+		lastAt = seen[hops[0]]
+	}
+	if b := blind[depends]; (state == verdict.Stopped || state == verdict.Silent) && b.Recent(now, s.grace) && !b.Predates(lastAt, s.grace) {
+		state = verdict.Unsure
+	}
+	fd := fleetDevice{Device: device, State: state, StoppedAfter: after, Route: rt.Name}
+	if next != "" {
+		fd.StoppedAt = viaOf(rt)[next]
+		if state == verdict.Stopped {
+			for _, dl := range s.rules.DeadLetters() {
+				if t, ok := seen[dl.HopName()]; ok && dl.Rejects == next && !t.Before(seen[hops[0]].Add(-s.grace)) {
+					fd.Rejected = true
+				}
+			}
+		}
+	}
+	return fd
+}
+
+// allHops lists every route's hops once, in route order.
+func (s *server) allHops() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, rt := range s.rules.AllRoutes() {
+		for _, h := range rt.Hops() {
+			if !seen[h] {
+				seen[h] = true
+				out = append(out, h)
+			}
+		}
+	}
+	return out
+}
+
+// counterType marks fleet sightings that come from device counters, which
+// carry no message type.
+const counterType = "\x00counters"
 
 // rejectedAfter reports whether a dead-letter source for the hop after
 // stoppedAfter saw the device as recently as its latest reading.
