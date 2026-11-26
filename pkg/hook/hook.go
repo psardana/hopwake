@@ -10,13 +10,17 @@
 //	h.Mark(ctx, hook.Store, device, seq)
 //
 // When Hopwake is not running, marks are dropped quietly; the service is
-// never slowed or stopped by its hook.
+// never slowed or stopped by its hook. A reading is marked served only the
+// first time, however often it is asked for.
+//
+// Hooks in other languages follow the same contract; see docs/hooks.md.
 package hook
 
 import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -37,7 +41,7 @@ const (
 
 // Config says where marks go and what they are called.
 type Config struct {
-	Tenant   string // as in the rules file
+	Tenant   string // as in the rules file; default $HOPWAKE_TENANT
 	Hop      string // the hop name, matching a hook source: "hook:" + match
 	Endpoint string // Hopwake's OTLP/HTTP endpoint; default $HOPWAKE_OTLP_ENDPOINT, else http://localhost:4318
 	Service  string // the service name on the spans; default the hop name
@@ -55,10 +59,37 @@ type Hook struct {
 	tp      *sdktrace.TracerProvider
 	rec     *hop.Recorder
 	aliases *alias.Resolver
+
+	mu     sync.Mutex
+	served map[string]struct{} // journey IDs already marked served
+}
+
+// servedLimit bounds the memory of served readings; past it the hook
+// forgets and starts again, at worst marking a reading served twice.
+const servedLimit = 100_000
+
+// firstServe reports whether a serve mark for the journey should be sent.
+func (h *Hook) firstServe(op hop.Op, id string) bool {
+	if op != Serve {
+		return true
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.served[id]; ok {
+		return false
+	}
+	if len(h.served) >= servedLimit {
+		h.served = map[string]struct{}{}
+	}
+	h.served[id] = struct{}{}
+	return true
 }
 
 // New starts a hook. It does not contact Hopwake until the first marks are sent.
 func New(ctx context.Context, c Config) (*Hook, error) {
+	if c.Tenant == "" {
+		c.Tenant = os.Getenv("HOPWAKE_TENANT")
+	}
 	if c.Tenant == "" || c.Hop == "" {
 		return nil, errors.New("hook: tenant and hop are required")
 	}
@@ -84,7 +115,7 @@ func New(ctx context.Context, c Config) (*Hook, error) {
 	if c.TimePrecision == 0 {
 		c.TimePrecision, _ = time.ParseDuration(os.Getenv("HOPWAKE_TIME_PRECISION"))
 	}
-	h := &Hook{cfg: c, tp: tp, rec: hop.NewRecorder(tp)}
+	h := &Hook{cfg: c, tp: tp, rec: hop.NewRecorder(tp), served: map[string]struct{}{}}
 	if c.Aliases == "" {
 		c.Aliases = os.Getenv("HOPWAKE_API")
 	}
@@ -102,6 +133,9 @@ func (h *Hook) Mark(ctx context.Context, op hop.Op, device string, seq uint64) e
 // MarkBoot is Mark for sources that name a boot field.
 func (h *Hook) MarkBoot(ctx context.Context, op hop.Op, device, boot string, seq uint64) error {
 	k := journey.Key{Tenant: h.cfg.Tenant, Device: device, Boot: boot, Seq: seq}
+	if !h.firstServe(op, k.ID()) {
+		return nil
+	}
 	return h.rec.Record(ctx, hop.Event{
 		JourneyID:   k.ID(),
 		Tenant:      h.cfg.Tenant,
@@ -148,6 +182,9 @@ func (h *Hook) MarkTimeAlias(ctx context.Context, op hop.Op, aliasKind, aliasVal
 
 func (h *Hook) markTime(ctx context.Context, op hop.Op, device, aliasOf, messageType string, at time.Time) error {
 	k := journey.Key{Tenant: h.cfg.Tenant, Device: device, Type: messageType, Time: journey.FormatTime(at, h.cfg.TimePrecision)}
+	if !h.firstServe(op, k.ID()) {
+		return nil
+	}
 	return h.rec.Record(ctx, hop.Event{
 		JourneyID:   k.ID(),
 		Tenant:      h.cfg.Tenant,
