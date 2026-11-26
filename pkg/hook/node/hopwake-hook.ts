@@ -42,6 +42,25 @@ export function journeyId(tenant: string, device: string, seq: number | bigint, 
   return id.toString('hex');
 }
 
+/** The journey ID of a reading with no sequence number: device, message type and its own time. */
+export function timeJourneyId(tenant: string, device: string, messageType: string, at: Date): string {
+  const h = createHash('sha256');
+  h.update(field('hopwake/journey/time/v1'));
+  h.update(field(tenant));
+  h.update(field(device));
+  h.update(field(`type:${messageType}`));
+  h.update(field(`time:${rfc3339Nano(at)}`));
+  const id = h.digest().subarray(0, 16);
+  if (id.every((x) => x === 0)) id[15] = 1;
+  return id.toString('hex');
+}
+
+// Go's RFC3339Nano in UTC: trailing zeros of the fraction dropped.
+function rfc3339Nano(at: Date): string {
+  const iso = at.toISOString(); // 2026-11-18T10:00:00.500Z
+  return iso.replace(/\.(\d*?)0*Z$/, (_, f) => (f ? `.${f}Z` : 'Z'));
+}
+
 type Attr = { key: string; value: { stringValue?: string; intValue?: string } };
 type Span = { traceId: string; spanId: string; name: string; kind: number; startTimeUnixNano: string; endTimeUnixNano: string; attributes: Attr[] };
 

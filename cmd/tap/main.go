@@ -14,9 +14,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -27,16 +30,19 @@ import (
 	"syscall"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/eclipse/paho.golang/autopaho"
+	"github.com/eclipse/paho.golang/paho"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
+	"github.com/psardana/hopwake/internal/alias"
 	"github.com/psardana/hopwake/internal/capture"
 	"github.com/psardana/hopwake/internal/hop"
 	"github.com/psardana/hopwake/internal/journey"
+	"github.com/psardana/hopwake/internal/protodec"
 	"github.com/psardana/hopwake/internal/schema"
 	"github.com/psardana/hopwake/internal/shape"
 )
@@ -99,6 +105,7 @@ func (h *health) take(hopName string) hopHealth {
 type message struct {
 	topic   string
 	payload []byte
+	props   paho.UserProperties // MQTT 5 user properties
 	at      time.Time
 }
 
@@ -157,15 +164,37 @@ func main() {
 	}
 
 	watched := &watchList{}
+	var aliases *alias.Resolver
 	if *control != "" {
 		go watched.follow(ctx, strings.TrimRight(*control, "/")+"/api/watches", 5*time.Second)
+		aliases = alias.NewResolver(ctx, *control, 5*time.Second)
 	}
 
 	ctr := &counters{hops: map[string]map[string]hop.Count{}, from: time.Now()}
 
 	var announced sync.Map // hop + fingerprint → struct{}: shapes whose fields were already sent
 	// header returns a message header by name; nil for MQTT.
-	observe := func(kind, topic string, payload []byte, header func(string) string, delay time.Duration) {
+	// .proto directories, compiled once per directory.
+	decoders := map[string]*protodec.Decoder{}
+	for _, s := range rules.Sources {
+		p := rules.ProtoPath(s)
+		if s.Format != "protobuf" || decoders[p] != nil {
+			continue
+		}
+		d, err := protodec.Load(p)
+		if err != nil {
+			log.Fatal(err)
+		}
+		for f, why := range d.Skipped {
+			log.Printf("%s: skipped %s: %s", p, f, why)
+		}
+		decoders[p] = d
+		log.Printf("%s: %d message types", p, len(d.Types()))
+	}
+
+	// header returns a Kafka header or MQTT 5 user property by name; key is
+	// the Kafka record key.
+	observe := func(kind, topic string, payload []byte, header func(string) string, recordKey []byte, delay time.Duration) {
 		src, ok := rules.Source(kind, topic)
 		if !ok {
 			return
@@ -186,20 +215,72 @@ func main() {
 			hl.saw(src.HopName(), 0, rec.RecordWindow(ctx, w) == nil)
 			return
 		}
+		// Protobuf payloads are decoded to JSON first, so everything after
+		// this works the same for both formats.
+		body, msgType, decodeErr := payload, "", ""
+		var sh shape.Shape
+		if src.Format == "protobuf" {
+			msgType = src.Proto.Type
+			if src.Proto.TypeFrom != "" && header != nil {
+				msgType = header(src.Proto.TypeFrom)
+			}
+			if msgType == "" {
+				decodeErr = "no message type in " + src.Proto.TypeFrom
+			} else if res, err := decoders[rules.ProtoPath(src)].Decode(msgType, payload); err != nil {
+				decodeErr = err.Error()
+			} else {
+				body, sh = res.JSON, res.Shape
+			}
+		} else {
+			sh = shape.Of(payload)
+		}
 		rule, _ := rules.Rule(kind, topic)
-		key, err := rule.Extract(topic, payload)
+		if src.AsType != "" {
+			msgType = src.AsType
+		}
+		meta := journey.Meta{Header: header, Key: recordKey, Type: msgType}
+		key, err := rule.ExtractMeta(topic, body, meta)
+		if decodeErr != "" {
+			// A message that does not decode cannot be numbered from its
+			// content. Its journey ID comes from the device and the bytes, so
+			// the same bad message is one journey at every hop.
+			dev, derr := rule.Device(topic, meta)
+			if derr != nil {
+				hl.saw(src.HopName(), delay, false)
+				return
+			}
+			sum := sha256.Sum256(payload)
+			key, err = journey.Key{Tenant: rules.Tenant, Device: dev, Type: msgType, Time: "undecodable:" + hex.EncodeToString(sum[:8])}, nil
+			sh = shape.New([]shape.Field{{Path: "$", Type: "binary"}})
+		}
 		if err != nil {
 			hl.saw(src.HopName(), delay, false)
 			return
 		}
-		sh := shape.Of(payload)
+		// Downstream of an identity change the device goes by another name;
+		// resolve it to the device the upstream hops know.
+		aliasOf := ""
+		if src.DeviceAlias != "" {
+			dev, ok := "", false
+			if aliases != nil {
+				dev, ok = aliases.Device(src.DeviceAlias, key.Device)
+			}
+			if !ok {
+				hl.saw(src.HopName(), delay, false)
+				return
+			}
+			aliasOf = alias.Format(src.DeviceAlias, key.Device)
+			key.Device = dev
+		}
 		fields := ""
 		if _, done := announced.LoadOrStore(src.HopName()+" "+sh.Fingerprint, struct{}{}); !done {
 			fields = sh.String()
 		}
 		op, reason := hop.OpReceive, ""
-		if v := validators[src.HopName()]; v != nil && checked[src.HopName()].Add(1)%uint64(max(src.ValidateEvery, 1)) == 0 {
-			if err := v.Check(payload); err != nil {
+		if decodeErr != "" {
+			op, reason = hop.OpError, decodeErr
+		} else if v := validators[src.HopName()]; v != nil && checked[src.HopName()].Add(1)%uint64(max(src.ValidateEvery, 1)) == 0 {
+			if err := v.Check(body); err != nil {
 				op, reason = hop.OpError, err.Error()
 			}
 		}
@@ -215,7 +296,7 @@ func main() {
 		payloadCopy := ""
 		isWatched := watched.has(key.Device, time.Now())
 		if isWatched {
-			payloadCopy, _ = capture.Prepare(payload, rules.Redact)
+			payloadCopy, _ = capture.Prepare(body, rules.Redact)
 		}
 		if op == hop.OpReceive && !isWatched && !sampled(key.ID(), *sample) {
 			hl.saw(src.HopName(), delay, true)
@@ -237,6 +318,8 @@ func main() {
 			ShapeFP:     sh.Fingerprint,
 			ShapeFields: fields,
 			Payload:     payloadCopy,
+			MessageType: msgType,
+			Alias:       aliasOf,
 		})
 		hl.saw(src.HopName(), delay, err == nil)
 	}
@@ -271,42 +354,68 @@ func main() {
 		inbox := make(chan message, *queue)
 		go func() {
 			for m := range inbox {
-				observe("mqtt", m.topic, m.payload, nil, time.Since(m.at))
+				props := m.props
+				observe("mqtt", m.topic, m.payload, func(name string) string { return props.Get(name) }, nil, time.Since(m.at))
 			}
 		}()
-		filters := map[string]byte{}
-		for _, f := range mqttFilters {
-			filters[f] = 0 // QoS 0: the tap must never slow the broker down
+		u, err := url.Parse(*broker)
+		if err != nil {
+			log.Fatalf("mqtt: %v", err)
 		}
-		mc := mqtt.NewClient(mqtt.NewClientOptions().
-			AddBroker(*broker).
-			SetClientID(fmt.Sprintf("hopwake-tap-%d", os.Getpid())).
-			SetCleanSession(true).
-			SetAutoReconnect(true).
-			SetConnectRetry(true).
-			SetConnectRetryInterval(2 * time.Second).
-			SetConnectionLostHandler(func(mqtt.Client, error) {
+		subs := make([]paho.SubscribeOptions, 0, len(mqttFilters))
+		for _, f := range mqttFilters {
+			subs = append(subs, paho.SubscribeOptions{Topic: f, QoS: 0}) // QoS 0: the tap must never slow the broker down
+		}
+		// MQTT 5, so the tap sees user properties such as a message type.
+		cm, err := autopaho.NewConnection(ctx, autopaho.ClientConfig{
+			ServerUrls:                    []*url.URL{u},
+			KeepAlive:                     30,
+			CleanStartOnInitialConnection: true,
+			SessionExpiryInterval:         0,
+			ReconnectBackoff:              autopaho.NewConstantBackoff(2 * time.Second),
+			OnConnectionUp: func(cm *autopaho.ConnectionManager, _ *paho.Connack) {
+				go func() {
+					if _, err := cm.Subscribe(ctx, &paho.Subscribe{Subscriptions: subs}); err != nil {
+						log.Printf("mqtt subscribe: %v", err)
+						return
+					}
+					mqttUp.Store(true)
+					log.Printf("mqtt: watching %s", strings.Join(mqttFilters, ", "))
+				}()
+			},
+			OnConnectionDown: func() bool {
 				mqttUp.Store(false)
 				markDown(mqttHops)
-			}).
-			SetOnConnectHandler(func(c mqtt.Client) {
-				if t := c.SubscribeMultiple(filters, func(_ mqtt.Client, m mqtt.Message) {
+				return true
+			},
+			OnConnectError: func(err error) { log.Printf("mqtt: %v", err) },
+			ClientConfig: paho.ClientConfig{
+				ClientID: fmt.Sprintf("hopwake-tap-%d", os.Getpid()),
+				OnPublishReceived: []func(paho.PublishReceived) (bool, error){func(pr paho.PublishReceived) (bool, error) {
+					p := pr.Packet
+					var props paho.UserProperties
+					if p.Properties != nil {
+						props = p.Properties.User
+					}
 					select {
-					case inbox <- message{topic: m.Topic(), payload: m.Payload(), at: time.Now()}:
+					case inbox <- message{topic: p.Topic, payload: p.Payload, props: props, at: time.Now()}:
 					default:
-						if src, ok := rules.Source("mqtt", m.Topic()); ok {
+						if src, ok := rules.Source("mqtt", p.Topic); ok {
 							hl.miss(src.HopName())
 						}
 					}
-				}); t.Wait() && t.Error() != nil {
-					log.Printf("mqtt subscribe: %v", t.Error())
-					return
-				}
-				mqttUp.Store(true)
-				log.Printf("mqtt: watching %s", strings.Join(mqttFilters, ", "))
-			}))
-		mc.Connect()
-		defer mc.Disconnect(250)
+					return true, nil
+				}},
+			},
+		})
+		if err != nil {
+			log.Fatalf("mqtt: %v", err)
+		}
+		defer func() {
+			c, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = cm.Disconnect(c)
+		}()
 	}
 
 	if *brokers != "" && len(kafkaTopics) > 0 {
@@ -340,7 +449,7 @@ func main() {
 							}
 						}
 						return ""
-					}, delay)
+					}, r.Key, delay)
 				})
 			}
 		}()

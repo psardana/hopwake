@@ -25,3 +25,23 @@ console.log(journeyId('acme', 'dev-00042', 1683), journeyId('acme', 'dev-00042',
 		t.Fatalf("node %s\n  go %s", got, want)
 	}
 }
+
+// The Node hook derives the same time-based journey IDs as Go.
+func TestNodeHookAgreesOnTimeIDs(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	script := `import { timeJourneyId } from './pkg/hook/node/hopwake-hook.ts';
+console.log(timeJourneyId('t', 'S1', 'plant.readings.Basic', new Date('2026-11-18T10:00:00.500Z')), timeJourneyId('t', 'S1', 'plant.readings.Basic', new Date('2026-11-18T10:00:00Z')));`
+	cmd := exec.Command(node, "--input-type=module", "-e", script)
+	cmd.Dir = "../.."
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	want := TimeID("t", "S1", "plant.readings.Basic", "2026-11-18T10:00:00.5Z") + " " + TimeID("t", "S1", "plant.readings.Basic", "2026-11-18T10:00:00Z")
+	if got := strings.TrimSpace(string(out)); got != want {
+		t.Fatalf("node %s\n  go %s", got, want)
+	}
+}

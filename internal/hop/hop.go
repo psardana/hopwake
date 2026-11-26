@@ -34,6 +34,8 @@ const (
 	AttrShapeFields = "hopwake.shape.fields"
 	AttrReason      = "hopwake.reason"
 	AttrPayload     = "hopwake.payload"
+	AttrMessageType = "hopwake.message.type"
+	AttrAlias       = "hopwake.device.alias"
 
 	// SchemaVersion hop/v1 adds the shape attributes to hop/v0.
 	SchemaVersion = "hop/v1"
@@ -80,6 +82,8 @@ type Event struct {
 	ShapeFields string // the shape's fields, sent with the first event of a new shape only
 	Reason      string // why a reading was rejected or failed (op drop or error)
 	Payload     string // the redacted payload, for watched devices only
+	MessageType string // the message's type, for sources that name one
+	Alias       string // another name of the device at this hop, "kind:value", e.g. "systemId:100042"
 }
 
 // Validate reports what is wrong with an event, if anything.
@@ -140,6 +144,12 @@ func (r *Recorder) Record(ctx context.Context, e Event) error {
 	}
 	if e.Payload != "" {
 		span.SetAttributes(attribute.String(AttrPayload, e.Payload))
+	}
+	if e.MessageType != "" {
+		span.SetAttributes(attribute.String(AttrMessageType, e.MessageType))
+	}
+	if e.Alias != "" {
+		span.SetAttributes(attribute.String(AttrAlias, e.Alias))
 	}
 	span.End(trace.WithTimestamp(at))
 	return nil

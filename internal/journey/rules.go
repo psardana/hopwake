@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -40,6 +41,15 @@ type Config struct {
 	Tenant  string   `yaml:"tenant"`
 	Sources []Source `yaml:"sources"`
 	Route   []Step   `yaml:"route"`
+	// Routes are routes chosen by message type, for sources that name each
+	// message's type (see Source.Proto). A message follows every route one of
+	// whose type prefixes matches its type; Route, if set, is the route for
+	// messages no typed route covers.
+	Routes []TypedRoute `yaml:"routes"`
+	// TimePrecision rounds a reading's own time down before it becomes part
+	// of a journey ID, so hops that keep the time less precisely (a store
+	// that keeps whole seconds) still agree. Zero keeps it as given.
+	TimePrecision time.Duration `yaml:"time_precision"`
 	// Spans maps spans from services that already trace onto hops, when they
 	// carry the device and sequence number as attributes.
 	Spans []SpanRule `yaml:"spans"`
@@ -71,6 +81,111 @@ func (c *Config) SpanRule(service, span string) (SpanRule, bool) {
 	return SpanRule{}, false
 }
 
+// TypedRoute is a route for messages whose type starts with one of Types,
+// compared by dotted components ("ems.measurements" matches
+// "ems.measurements.BasicMeasurement" but not "ems.measurementsX").
+type TypedRoute struct {
+	Name  string   `yaml:"name"`
+	Types []string `yaml:"types"` // empty: every type (the untyped route)
+	Steps []Step   `yaml:"steps"`
+}
+
+// Hops returns the route's hop names in order.
+func (r TypedRoute) Hops() []string {
+	out := make([]string, len(r.Steps))
+	for i, s := range r.Steps {
+		out[i] = s.Hop
+	}
+	return out
+}
+
+// RequiredHops returns the hops every reading on the route should reach.
+func (r TypedRoute) RequiredHops() []string {
+	var out []string
+	for _, s := range r.Steps {
+		if !s.Optional {
+			out = append(out, s.Hop)
+		}
+	}
+	return out
+}
+
+// Optional returns the route's optional hops.
+func (r TypedRoute) Optional() []string {
+	out := []string{}
+	for _, s := range r.Steps {
+		if s.Optional {
+			out = append(out, s.Hop)
+		}
+	}
+	return out
+}
+
+// Covers reports whether the route is for messages of type t.
+func (r TypedRoute) Covers(t string) bool {
+	if len(r.Types) == 0 {
+		return true
+	}
+	for _, p := range r.Types {
+		if t == p || strings.HasPrefix(t, p+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// AllRoutes returns every route: the typed ones, then the untyped one if set.
+func (c *Config) AllRoutes() []TypedRoute {
+	out := append([]TypedRoute(nil), c.Routes...)
+	if len(c.Route) > 0 {
+		out = append(out, TypedRoute{Name: "all", Steps: c.Route})
+	}
+	return out
+}
+
+// RoutesFor returns the routes a message of type t follows: every typed route
+// that covers it, or else the untyped route. An empty type (a source that
+// names no type) follows the untyped route, or every typed route if there is
+// none.
+func (c *Config) RoutesFor(t string) []TypedRoute {
+	var out []TypedRoute
+	if t != "" {
+		for _, r := range c.Routes {
+			if len(r.Types) > 0 && r.Covers(t) {
+				out = append(out, r)
+			}
+		}
+	}
+	if len(out) == 0 && len(c.Route) > 0 {
+		return []TypedRoute{{Name: "all", Steps: c.Route}}
+	}
+	if len(out) == 0 && t == "" {
+		return c.Routes
+	}
+	return out
+}
+
+// primary is the route the single-route views use: the untyped route, or the
+// first typed one.
+func (c *Config) primary() []Step {
+	if len(c.Route) > 0 {
+		return c.Route
+	}
+	if len(c.Routes) > 0 {
+		return c.Routes[0].Steps
+	}
+	return nil
+}
+
+// allSteps lists the steps of every route, for lookups by hop.
+func (c *Config) allSteps() []Step {
+	var out []Step
+	for _, r := range c.AllRoutes() {
+		out = append(out, r.Steps...)
+	}
+	return out
+}
+
 // Step is one hop of the route.
 type Step struct {
 	Hop string `yaml:"hop"`
@@ -87,7 +202,7 @@ type Step struct {
 // RequiredHops returns the hops every reading should reach, in order.
 func (c *Config) RequiredHops() []string {
 	var out []string
-	for _, s := range c.Route {
+	for _, s := range c.primary() {
 		if !s.Optional {
 			out = append(out, s.Hop)
 		}
@@ -97,7 +212,7 @@ func (c *Config) RequiredHops() []string {
 
 // Mapping returns the confirmed mapping into hop, parsed; nil if none.
 func (c *Config) Mapping(hop string) map[string]mapping.Expr {
-	for _, s := range c.Route {
+	for _, s := range c.allSteps() {
 		if s.Hop != hop || len(s.Mapping) == 0 {
 			continue
 		}
@@ -130,8 +245,9 @@ func (s *Step) UnmarshalYAML(n *yaml.Node) error {
 
 // Hops returns the route's hop names in order.
 func (c *Config) Hops() []string {
-	out := make([]string, len(c.Route))
-	for i, s := range c.Route {
+	steps := c.primary()
+	out := make([]string, len(steps))
+	for i, s := range steps {
 		out[i] = s.Hop
 	}
 	return out
@@ -139,8 +255,8 @@ func (c *Config) Hops() []string {
 
 // Via returns the service that carries readings to hop, if the route names one.
 func (c *Config) Via(hop string) string {
-	for _, s := range c.Route {
-		if s.Hop == hop {
+	for _, s := range c.allSteps() {
+		if s.Hop == hop && s.Via != "" {
 			return s.Via
 		}
 	}
@@ -177,6 +293,48 @@ type Source struct {
 	// An aggregate source holds outputs that stand for many readings. Each
 	// output carries a window record in the WindowHeader Kafka header.
 	WindowHeader string `yaml:"window_header"`
+
+	// Format is the payload format: empty or "json", or "protobuf" with Proto.
+	Format string     `yaml:"format"`
+	Proto  *ProtoSpec `yaml:"proto"`
+	// Where the device, sequence number and boot counter are when they are
+	// not in a JSON payload: a Kafka header or MQTT 5 user property, or the
+	// Kafka record key.
+	DeviceHeader  string `yaml:"device_header"`
+	DeviceFromKey bool   `yaml:"device_from_key"`
+	SeqFrom       string `yaml:"seq_from"`
+	BootFrom      string `yaml:"boot_from"`
+	// TimeField is a field holding the message's own timestamp, for sources
+	// with no sequence number: the journey ID is then derived from the
+	// device, the message type and that time.
+	TimeField string `yaml:"time_field"`
+	// DeviceAlias says the device found above is an alias of this kind, for
+	// example "systemId": Hopwake resolves it to the device from the pairs it
+	// learned upstream.
+	DeviceAlias string `yaml:"device_alias"`
+	// AsType is the message type to count readings as, where the source
+	// names none (or a different one) but carries readings that started as
+	// that type.
+	AsType string `yaml:"as_type"`
+}
+
+// ProtoSpec says how to decode a Protobuf source.
+type ProtoSpec struct {
+	Path     string `yaml:"path"`      // directory of .proto files, relative to the rules file
+	TypeFrom string `yaml:"type_from"` // header or MQTT 5 user property naming each message's full type
+	Type     string `yaml:"type"`      // or one fixed type for every message
+}
+
+// ProtoPath returns the source's .proto directory, resolved against the rules
+// file's directory.
+func (c *Config) ProtoPath(s Source) string {
+	if s.Proto == nil || s.Proto.Path == "" || filepath.IsAbs(s.Proto.Path) || c.Dir == "" {
+		if s.Proto == nil {
+			return ""
+		}
+		return s.Proto.Path
+	}
+	return filepath.Join(c.Dir, s.Proto.Path)
 }
 
 // Aggregate reports whether the source holds aggregated outputs.
@@ -271,8 +429,29 @@ func (c *Config) check() error {
 		if s.WindowHeader != "" {
 			return fmt.Errorf("%s: window_header needs role: aggregate", where)
 		}
-		if (s.DeviceFromTopic == "") == (s.DeviceField == "") {
-			return fmt.Errorf("%s: set exactly one of device_from_topic and device_field", where)
+		devices := 0
+		for _, set := range []bool{s.DeviceFromTopic != "", s.DeviceField != "", s.DeviceHeader != "", s.DeviceFromKey} {
+			if set {
+				devices++
+			}
+		}
+		if devices != 1 {
+			return fmt.Errorf("%s: set exactly one of device_from_topic, device_field, device_header and device_from_key", where)
+		}
+		if s.DeviceFromKey && s.Kind != "kafka" {
+			return fmt.Errorf("%s: device_from_key only applies to kafka sources", where)
+		}
+		switch s.Format {
+		case "", "json":
+			if s.Proto != nil {
+				return fmt.Errorf("%s: proto needs format: protobuf", where)
+			}
+		case "protobuf":
+			if s.Proto == nil || s.Proto.Path == "" || (s.Proto.TypeFrom == "") == (s.Proto.Type == "") {
+				return fmt.Errorf("%s: format protobuf needs proto.path and exactly one of proto.type_from and proto.type", where)
+			}
+		default:
+			return fmt.Errorf("%s: format must be json or protobuf, not %q", where, s.Format)
 		}
 		if s.DeviceFromTopic != "" {
 			if s.Kind != "mqtt" {
@@ -282,8 +461,17 @@ func (c *Config) check() error {
 				return fmt.Errorf("%s: device_from_topic must contain {device} once", where)
 			}
 		}
-		if s.SeqField == "" {
-			return fmt.Errorf("%s: seq_field is required", where)
+		seqs := 0
+		for _, set := range []bool{s.SeqField != "", s.SeqFrom != "", s.TimeField != ""} {
+			if set {
+				seqs++
+			}
+		}
+		if seqs != 1 {
+			return fmt.Errorf("%s: set exactly one of seq_field, seq_from and time_field", where)
+		}
+		if s.BootField != "" && s.BootFrom != "" {
+			return fmt.Errorf("%s: set at most one of boot_field and boot_from", where)
 		}
 		if s.ValidateEvery < 0 {
 			return fmt.Errorf("%s: validate_every must be 1 or more", where)
@@ -321,29 +509,25 @@ func (c *Config) check() error {
 		known[r.Hop] = true
 	}
 	seen := map[string]bool{}
-	for i, st := range c.Route {
-		h := st.Hop
-		if i == 0 && (st.Via != "" || len(st.Mapping) > 0) {
-			return fmt.Errorf("route: the first hop %q has nothing before it, so it cannot have via or mapping", h)
-		}
-		if st.Optional && i == 0 {
-			return fmt.Errorf("route: the first hop %q cannot be optional", h)
-		}
-		if !st.Optional && i > 0 && c.Route[i-1].Optional {
-			return fmt.Errorf("route: %q follows an optional hop; optional hops come last", h)
-		}
-		for f, x := range st.Mapping {
-			if _, err := mapping.ParseExpr(x); err != nil {
-				return fmt.Errorf("route: %s: %s: %w", h, f, err)
+	names := map[string]bool{}
+	for _, r := range c.AllRoutes() {
+		where := "route"
+		if r.Name != "all" || len(r.Types) > 0 {
+			where = fmt.Sprintf("route %q", r.Name)
+			if r.Name == "" || names[r.Name] {
+				return fmt.Errorf("routes: each typed route needs a unique name")
+			}
+			names[r.Name] = true
+			if len(r.Types) == 0 {
+				return fmt.Errorf("%s: types is required (route: is the route for every type)", where)
 			}
 		}
-		if !known[h] {
-			return fmt.Errorf("route: %q is not a source (use kind:match)", h)
+		if err := checkSteps(where, r.Steps, known); err != nil {
+			return err
 		}
-		if seen[h] {
-			return fmt.Errorf("route: %q appears twice", h)
+		for _, st := range r.Steps {
+			seen[st.Hop] = true
 		}
-		seen[h] = true
 	}
 	for _, s := range c.Sources {
 		if s.Aggregate() && seen[s.HopName()] {
@@ -355,9 +539,11 @@ func (c *Config) check() error {
 			return fmt.Errorf("route: %q is a dead-letter source and cannot be a hop of the route", s.HopName())
 		}
 		i := -1
-		for k, st := range c.Route {
-			if st.Hop == s.Rejects {
-				i = k
+		for _, r := range c.AllRoutes() {
+			for k, st := range r.Steps {
+				if st.Hop == s.Rejects && k > i {
+					i = k
+				}
 			}
 		}
 		if i < 1 {
@@ -382,12 +568,47 @@ func (c *Config) Source(kind, topic string) (Source, bool) {
 
 // Rule returns the extraction rule for a message on a topic, if a source
 // of that kind matches it. The first matching source wins.
+// checkSteps checks one route's steps.
+func checkSteps(where string, steps []Step, known map[string]bool) error {
+	if len(steps) == 0 {
+		return fmt.Errorf("%s: no steps", where)
+	}
+	seen := map[string]bool{}
+	for i, st := range steps {
+		h := st.Hop
+		if i == 0 && (st.Via != "" || len(st.Mapping) > 0) {
+			return fmt.Errorf("%s: the first hop %q has nothing before it, so it cannot have via or mapping", where, h)
+		}
+		if st.Optional && i == 0 {
+			return fmt.Errorf("%s: the first hop %q cannot be optional", where, h)
+		}
+		if !st.Optional && i > 0 && steps[i-1].Optional {
+			return fmt.Errorf("%s: %q follows an optional hop; optional hops come last", where, h)
+		}
+		for f, x := range st.Mapping {
+			if _, err := mapping.ParseExpr(x); err != nil {
+				return fmt.Errorf("%s: %s: %s: %w", where, h, f, err)
+			}
+		}
+		if !known[h] {
+			return fmt.Errorf("%s: %q is not a source (use kind:match)", where, h)
+		}
+		if seen[h] {
+			return fmt.Errorf("%s: %q appears twice", where, h)
+		}
+		seen[h] = true
+	}
+	return nil
+}
+
 func (c *Config) Rule(kind, topic string) (Rule, bool) {
 	s, ok := c.Source(kind, topic)
 	if !ok {
 		return Rule{}, false
 	}
-	return Rule{Tenant: c.Tenant, TopicPattern: s.DeviceFromTopic, DeviceField: s.DeviceField, SeqField: s.SeqField, BootField: s.BootField}, true
+	return Rule{Tenant: c.Tenant, TopicPattern: s.DeviceFromTopic, DeviceField: s.DeviceField, SeqField: s.SeqField, BootField: s.BootField,
+		DeviceHeader: s.DeviceHeader, DeviceFromKey: s.DeviceFromKey, SeqFrom: s.SeqFrom, BootFrom: s.BootFrom, TimeField: s.TimeField,
+		TimePrecision: c.TimePrecision}, true
 }
 
 // topicMatches applies MQTT filter rules: + matches one level, # the rest.

@@ -24,6 +24,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
+	"github.com/psardana/hopwake/internal/alias"
 	"github.com/psardana/hopwake/internal/hop"
 	"github.com/psardana/hopwake/internal/journey"
 )
@@ -40,13 +41,20 @@ type Config struct {
 	Hop      string // the hop name, matching a hook source: "hook:" + match
 	Endpoint string // Hopwake's OTLP/HTTP endpoint; default $HOPWAKE_OTLP_ENDPOINT, else http://localhost:4318
 	Service  string // the service name on the spans; default the hop name
+	// TimePrecision must match the rules file's time_precision, so marks
+	// made by time agree with the taps' journey IDs.
+	TimePrecision time.Duration
+	// Aliases is the journey service's base URL, for marks made under an
+	// alias such as a system ID (see MarkTimeAlias); default $HOPWAKE_API.
+	Aliases string
 }
 
 // Hook sends marks for one hop.
 type Hook struct {
-	cfg Config
-	tp  *sdktrace.TracerProvider
-	rec *hop.Recorder
+	cfg     Config
+	tp      *sdktrace.TracerProvider
+	rec     *hop.Recorder
+	aliases *alias.Resolver
 }
 
 // New starts a hook. It does not contact Hopwake until the first marks are sent.
@@ -73,7 +81,17 @@ func New(ctx context.Context, c Config) (*Hook, error) {
 		sdktrace.WithIDGenerator(hop.IDGenerator()),
 		sdktrace.WithResource(resource.NewSchemaless(semconv.ServiceName(c.Service))),
 	)
-	return &Hook{cfg: c, tp: tp, rec: hop.NewRecorder(tp)}, nil
+	if c.TimePrecision == 0 {
+		c.TimePrecision, _ = time.ParseDuration(os.Getenv("HOPWAKE_TIME_PRECISION"))
+	}
+	h := &Hook{cfg: c, tp: tp, rec: hop.NewRecorder(tp)}
+	if c.Aliases == "" {
+		c.Aliases = os.Getenv("HOPWAKE_API")
+	}
+	if c.Aliases != "" {
+		h.aliases = alias.NewResolver(context.Background(), c.Aliases, 5*time.Second)
+	}
+	return h, nil
 }
 
 // Mark says what happened to one reading, now.
@@ -94,6 +112,53 @@ func (h *Hook) MarkBoot(ctx context.Context, op hop.Op, device, boot string, seq
 		Op:          op,
 		Correlation: hop.Derived,
 		At:          time.Now(),
+	})
+}
+
+// MarkTime is Mark for readings that carry no sequence number: they are
+// known by their device, message type and the time the device gave them,
+// exactly as a tap derives their journey ID.
+func (h *Hook) MarkTime(ctx context.Context, op hop.Op, device, messageType string, at time.Time) error {
+	return h.markTime(ctx, op, device, "", messageType, at)
+}
+
+// MarkTimeTeach is MarkTime at a hop that knows both the device and another
+// name it goes by further down, such as the system ID a store keys it by.
+// Hopwake learns the pair, so later hops can mark readings under the alias.
+func (h *Hook) MarkTimeTeach(ctx context.Context, op hop.Op, device, aliasKind, aliasValue, messageType string, at time.Time) error {
+	return h.markTime(ctx, op, device, alias.Format(aliasKind, aliasValue), messageType, at)
+}
+
+// ErrUnknownAlias means Hopwake has not learned which device an alias names.
+var ErrUnknownAlias = errors.New("hook: unknown alias")
+
+// MarkTimeAlias is MarkTime for a hop that knows the device only by an alias,
+// such as a system ID. The hook resolves it to the device through the pairs
+// Hopwake learned upstream.
+func (h *Hook) MarkTimeAlias(ctx context.Context, op hop.Op, aliasKind, aliasValue, messageType string, at time.Time) error {
+	if h.aliases == nil {
+		return ErrUnknownAlias
+	}
+	device, ok := h.aliases.Device(aliasKind, aliasValue)
+	if !ok {
+		return ErrUnknownAlias
+	}
+	return h.markTime(ctx, op, device, alias.Format(aliasKind, aliasValue), messageType, at)
+}
+
+func (h *Hook) markTime(ctx context.Context, op hop.Op, device, aliasOf, messageType string, at time.Time) error {
+	k := journey.Key{Tenant: h.cfg.Tenant, Device: device, Type: messageType, Time: journey.FormatTime(at, h.cfg.TimePrecision)}
+	return h.rec.Record(ctx, hop.Event{
+		JourneyID:   k.ID(),
+		Tenant:      h.cfg.Tenant,
+		Device:      device,
+		Hop:         h.cfg.Hop,
+		System:      "hook",
+		Op:          op,
+		Correlation: hop.Derived,
+		At:          time.Now(),
+		MessageType: messageType,
+		Alias:       aliasOf,
 	})
 }
 

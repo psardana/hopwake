@@ -68,6 +68,8 @@ Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them.
 | `hopwake.schema.fp` | fingerprint of the payload's shape (field paths and types) at this hop |
 | `hopwake.shape.fields` | the shape's fields, on the first event of a new shape only |
 | `hopwake.reason` | why a reading was rejected or failed, on `drop` and `error` events |
+| `hopwake.message.type` | the message's type, for typed sources and hooks |
+| `hopwake.device.alias` | `kind:value`, another ID the device is known by from this hop on, such as `systemId:100046` |
 | `messaging.system`, `messaging.destination.name` | where the reading was seen, per the OpenTelemetry messaging conventions |
 
 ## Journey ID
@@ -75,7 +77,7 @@ Hop events are sent as OpenTelemetry spans, so any OTLP pipeline can carry them.
 Resolved in this order:
 
 1. `traceparent` on the message (MQTT 5 user property, Kafka header, AMQP property, HTTP header): use its trace ID.
-2. Otherwise `hash(tenant, device_id, seq)`, or `hash(tenant, device_id, device_ts)` when there is no sequence number. The fields are extracted by a configured rule per topic (topic pattern or JSON path).
+2. Otherwise `hash(tenant, device_id, seq)`, or `hash(tenant, device_id, message_type, device_ts)` when there is no sequence number. The device time is UTC RFC 3339, rounded down to the rules file's `time_precision`. The fields are extracted by a configured rule per source: topic pattern, field path, header or record key.
 3. Otherwise the first tap mints an ID and later hops match on device ID within a time window. Such links are marked `inferred`.
 
 ### Device reboots

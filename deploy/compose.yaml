@@ -3,6 +3,9 @@
 # next to a customer's pipeline. Start the reference pipeline first:
 #   docker compose -f reference/compose.yaml up -d --build
 #   docker compose -f deploy/compose.yaml up -d --build
+# Other pipelines: HOPWAKE_RULES, HOPWAKE_SCHEMAS, HOPWAKE_PROTOS and
+# HOPWAKE_FLEET point at their files, and HOPWAKE_NETWORK names the Docker
+# network to join.
 name: hopwake
 
 services:
@@ -48,8 +51,9 @@ services:
       TAP_SAMPLE: ${TAP_SAMPLE:-1}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
     volumes:
-      - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
-      - ../reference/schemas:/etc/hopwake/schemas:ro
+      - ${HOPWAKE_RULES:-../reference/journey-rules.yaml}:/etc/hopwake/journey-rules.yaml:ro
+      - ${HOPWAKE_SCHEMAS:-../reference/schemas}:/etc/hopwake/schemas:ro
+      - ${HOPWAKE_PROTOS:-../reference/schemas}:/etc/hopwake/protos:ro
     depends_on:
       - collector
 
@@ -64,8 +68,9 @@ services:
       INGEST_RULES: /etc/hopwake/journey-rules.yaml
       OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
     volumes:
-      - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
-      - ../reference/schemas:/etc/hopwake/schemas:ro
+      - ${HOPWAKE_RULES:-../reference/journey-rules.yaml}:/etc/hopwake/journey-rules.yaml:ro
+      - ${HOPWAKE_SCHEMAS:-../reference/schemas}:/etc/hopwake/schemas:ro
+      - ${HOPWAKE_PROTOS:-../reference/schemas}:/etc/hopwake/protos:ro
     ports:
       - "4319:4319"
     depends_on:
@@ -82,9 +87,10 @@ services:
       JOURNEY_CLICKHOUSE: clickhouse:9000
       JOURNEY_FLEET: /etc/hopwake/fleet.txt
     volumes:
-      - ../reference/journey-rules.yaml:/etc/hopwake/journey-rules.yaml:ro
-      - ../reference/schemas:/etc/hopwake/schemas:ro
-      - ../reference/fleet.txt:/etc/hopwake/fleet.txt:ro
+      - ${HOPWAKE_RULES:-../reference/journey-rules.yaml}:/etc/hopwake/journey-rules.yaml:ro
+      - ${HOPWAKE_SCHEMAS:-../reference/schemas}:/etc/hopwake/schemas:ro
+      - ${HOPWAKE_PROTOS:-../reference/schemas}:/etc/hopwake/protos:ro
+      - ${HOPWAKE_FLEET:-../reference/fleet.txt}:/etc/hopwake/fleet.txt:ro
     ports:
       - "8090:8090"
     depends_on:
@@ -93,5 +99,5 @@ services:
 
 networks:
   default:
-    name: hopwake-reference_default
+    name: ${HOPWAKE_NETWORK:-hopwake-reference_default}
     external: true
