@@ -1,0 +1,2 @@
+dev.hopwake.hook.spring.HopwakeAutoConfiguration
+dev.hopwake.hook.spring.kafka.HopwakeKafkaAutoConfiguration
