@@ -15,6 +15,8 @@ Early work: it runs against its own reference pipeline, not yet against anyone e
 | 0. Validate | Reference pipeline with a simulated fleet, baseline with plain OpenTelemetry | Done |
 | 1. Core journey | MQTT and Kafka taps, journey IDs, storage, a device journey view | Done |
 | 2. Transforms and aggregates | Why a reading stopped, schemas and mappings, aggregates, readings followed to the portal | Done; the gate needs outside teams |
+| 3. Real fleets, many formats | Protobuf sources named by a message-type header, routes per message type, readings followed across a change of device ID | Done for the first scenario |
+| 4. Hooks in every language, a read-only tap | One hook contract in Go, Java (with a Spring Boot starter), Python, .NET, Rust, Node and C for devices; device marks over MQTT; a tap that needs only read rights | Built locally |
 
 ## How it works
 
@@ -37,13 +39,16 @@ See [docs/architecture.md](docs/architecture.md) and [docs/hop-event.md](docs/ho
 | `internal/shape/`, `internal/schema/` | Payload shapes and their drift; checks against declared JSON Schemas |
 | `internal/mapping/` | Proposes how a service maps fields, from the same readings seen at two hops, and checks values |
 | `internal/capture/` | Payloads of watched devices, redacted before they leave the tap |
-| `pkg/hook/` | Go and Node hooks for hops a tap cannot see, such as a database write or an API response |
+| `pkg/hook/` | Hooks for hops a tap cannot see, such as a database write or an API response: Go, `java/` (with a Spring Boot starter), `python/`, `dotnet/`, `rust/`, `node/`, and `c/` for devices that mark their own sends. One contract, [docs/hooks.md](docs/hooks.md), checked by `scripts/check-hooks.sh` |
+| `cmd/hookcheck/` | Stands in for Hopwake to check a hook on the wire |
+| `internal/devmark/` | Reads the marks devices publish about their own sends |
 | `cmd/tap/` | Passive MQTT and Kafka tap: hop events, shapes, schema checks, dead letters, aggregates, counters and its own health |
 | `cmd/journey/` | Journey service and view: verdicts, shapes, watch mode, mappings and aggregates |
 | `cmd/ingest/` | Turns spans from services that already trace into hop events |
 | `cmd/journeyprobe/` | The Phase 0 prototype: compares two hops in memory |
 | `deploy/` | Hopwake's own stack: tap, OpenTelemetry Collector, ClickHouse, journey service |
 | `reference/` | A self-contained IoT pipeline with a simulated fleet, used to develop and test Hopwake |
+| `reference/qa/` | A broker and cluster locked down like a production one, to check the tap needs only read rights and to measure it (`scripts/qa-tap.sh`) |
 
 ## Try it
 
