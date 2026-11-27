@@ -16,7 +16,7 @@ the journey view puts them on the same reading. Hooks exist for:
 | .NET | `pkg/hook/dotnet` | no dependencies beyond the base library |
 | Rust | `pkg/hook/rust` | |
 | Node | `pkg/hook/node` | |
-| C (devices) | `pkg/hook/c` | marks go over the device's own MQTT link, through the tap; see [Device marks](#device-marks) |
+| C and C++ (devices) | `pkg/hook/c` | marks go over the device's own MQTT link, through the tap; see [Device marks](#device-marks) |
 
 Every hook follows the contract below. The shared test vectors
 (`pkg/hook/testdata/vectors.json`) and the wire check (`cmd/hookcheck`)

@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ import (
 
 	"github.com/psardana/hopwake/internal/alias"
 	"github.com/psardana/hopwake/internal/capture"
+	"github.com/psardana/hopwake/internal/devmark"
 	"github.com/psardana/hopwake/internal/hop"
 	"github.com/psardana/hopwake/internal/journey"
 	"github.com/psardana/hopwake/internal/protodec"
@@ -324,10 +326,53 @@ func main() {
 		hl.saw(src.HopName(), delay, err == nil)
 	}
 
+	// Device marks: what a device says it did, on its own MQTT topic. The
+	// device is the one the topic names, so a device can only mark itself.
+	deviceMarks := func(topic string, payload []byte, srcs []journey.Source, device string, delay time.Duration) {
+		msg, err := devmark.Parse(payload)
+		if err != nil {
+			hl.saw(srcs[0].HopName(), delay, false)
+			return
+		}
+		if msg.Dropped > 0 {
+			log.Printf("%s: the device dropped %d marks it could not keep", device, msg.Dropped)
+		}
+		for _, m := range msg.Marks {
+			var src *journey.Source
+			for i := range srcs {
+				if srcs[i].Match == m.Hop {
+					src = &srcs[i]
+				}
+			}
+			if src == nil {
+				hl.saw(srcs[0].HopName(), delay, false)
+				continue
+			}
+			e, err := m.Event(rules.Tenant, device, src.HopName(), rules.TimePrecision, time.Now().Add(-delay))
+			if err != nil {
+				hl.saw(src.HopName(), delay, false)
+				continue
+			}
+			e.Destination = topic
+			e.Bytes = len(payload)
+			ctr.add(src.HopName(), device, false)
+			if !watched.has(device, time.Now()) && !sampled(e.JourneyID, *sample) {
+				hl.saw(src.HopName(), delay, true)
+				continue
+			}
+			hl.saw(src.HopName(), delay, rec.Record(ctx, e) == nil)
+		}
+	}
+
 	var mqttHops, kafkaHops []string
 	var mqttFilters, kafkaTopics []string
 	for _, s := range rules.Sources {
 		switch s.Kind {
+		case "device":
+			if !slices.Contains(mqttFilters, s.Topic) {
+				mqttFilters = append(mqttFilters, s.Topic)
+			}
+			mqttHops = append(mqttHops, s.HopName())
 		case "mqtt":
 			mqttFilters = append(mqttFilters, s.Match)
 			mqttHops = append(mqttHops, s.HopName())
@@ -354,6 +399,10 @@ func main() {
 		inbox := make(chan message, *queue)
 		go func() {
 			for m := range inbox {
+				if srcs, device := rules.DeviceSources(m.topic); len(srcs) > 0 {
+					deviceMarks(m.topic, m.payload, srcs, device, time.Since(m.at))
+					continue
+				}
 				props := m.props
 				observe("mqtt", m.topic, m.payload, func(name string) string { return props.Get(name) }, nil, time.Since(m.at))
 			}
@@ -402,6 +451,8 @@ func main() {
 					default:
 						if src, ok := rules.Source("mqtt", p.Topic); ok {
 							hl.miss(src.HopName())
+						} else if srcs, _ := rules.DeviceSources(p.Topic); len(srcs) > 0 {
+							hl.miss(srcs[0].HopName())
 						}
 					}
 					return true, nil

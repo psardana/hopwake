@@ -144,6 +144,7 @@ const hopWhere = h => h.slice(h.indexOf(':') + 1);
 // ("telemetry.raw" → raw, "ems.measurements.raw" → measurements).
 const hopShort = h => {
   if (hopKind(h) === 'mqtt') return 'MQTT';
+  if (hopKind(h) === 'device') return 'device';
   if (hopKind(h) === 'hook') return hopWhere(h);
   const parts = hopWhere(h).split('.');
   return parts.length >= 3 ? parts.slice(1, -1).join('.') : parts.pop();
@@ -230,7 +231,7 @@ function renderFleet() {
     <div class="stats">${devs.some(d => d.shape_changed) ? `<span class="chip shape">${devs.filter(d => d.shape_changed).length} shape changed</span>` : ''}${n('stopped') ? `<span class="chip bad">${n('stopped')} stopped</span>` : ''}${devs.some(d => d.invalid) ? `<span class="chip bad">${devs.filter(d => d.invalid).length} breaking a schema</span>` : ''}${n('silent') ? `<span class="chip bad">${n('silent')} silent</span>` : ''}${n('unsure') ? `<span class="chip">${n('unsure')} waiting for the tap</span>` : ''}${never ? `<span class="chip bad">${never} never seen</span>` : ''}<span class="chip">${n('ok')} healthy</span></div>
     <section class="panel" style="overflow-x:auto" aria-label="Devices">
       ${devs.length ? `<table><thead><tr><th>Device</th><th>State</th>${route.map(h => `<th>Last seen at ${esc(hopShort(h))}</th>`).join('')}</tr></thead><tbody>
-      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at, d.rejected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}${d.invalid ? ' <span class="chip bad">Breaks schema</span>' : ''}${d.wrong_values ? ' <span class="chip bad">Wrong values</span>' : ''}${d.watched ? ' <span class="chip" title="payloads captured at every hop">Watched</span>' : ''}</td>${route.map((h, i) => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : i === 0 && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
+      ${devs.map(d => `<tr data-d="${esc(d.device)}"><td class="mono">${esc(d.device)}</td><td>${stateChip(d.state, d.stopped_after, d.expected, d.stopped_at, d.rejected)}${d.shape_changed ? ' <span class="chip shape">Shape changed</span>' : ''}${d.invalid ? ' <span class="chip bad">Breaks schema</span>' : ''}${d.wrong_values ? ' <span class="chip bad">Wrong values</span>' : ''}${d.watched ? ' <span class="chip" title="payloads captured at every hop">Watched</span>' : ''}</td>${route.map(h => `<td class="quiet">${d.last_seen[h] ? ago(d.last_seen[h]) : h === route.find(x => hopKind(x) !== 'device') && d.last_ever ? `last ${ago(d.last_ever)}` : '—'}</td>`).join('')}</tr>`).join('')}
       </tbody></table>` : '<div class="empty">No hop events in this window yet. Is the tap running?</div>'}
     </section>`;
   for (const tr of document.querySelectorAll('tbody tr')) tr.onclick = () => location.hash = `#/device/${encodeURIComponent(tr.dataset.d)}`;

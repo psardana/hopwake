@@ -45,7 +45,7 @@ for l in "${langs[@]}"; do
     c)
       if [ -f pkg/hook/c/Makefile ]; then
         run "c: tests" make -s -C pkg/hook/c test
-        run "c: through the tap" go test ./cmd/tap -run DeviceMarks -count=1
+        run "c: through the tap" go test ./internal/devmark -run DeviceMarksFromC -count=1
       fi ;;
     *) echo "unknown language: $l"; failed+=("$l") ;;
   esac

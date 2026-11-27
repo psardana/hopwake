@@ -52,6 +52,7 @@ const (
 	OpAggregate Op = "aggregate"
 	OpStore     Op = "store"
 	OpServe     Op = "serve"
+	OpSend      Op = "send" // a device published the reading
 	OpDrop      Op = "drop"
 	OpError     Op = "error"
 )

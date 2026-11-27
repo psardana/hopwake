@@ -17,9 +17,10 @@ Each source is something a tap reads, or a hop a service marks itself. A source'
 | Field | Meaning |
 | --- | --- |
 | `name` | For people |
-| `kind` | `mqtt`, `kafka` or `hook` |
-| `match` | MQTT topic filter (`+`, `#`), Kafka topic, or a hook's name |
-| `device_from_topic` | MQTT only: the topic with `{device}` in place of the device level |
+| `kind` | `mqtt`, `kafka`, `hook` or `device` |
+| `match` | MQTT topic filter (`+`, `#`), Kafka topic, or a hook's or device hop's name |
+| `topic` | Device sources only: the MQTT topic filter the device marks arrive on |
+| `device_from_topic` | MQTT and device sources: the topic with `{device}` in place of the device level |
 | `device_field` | Field holding the device (a dotted path such as `meta.serial` works) |
 | `device_header` | Kafka header or MQTT user property holding the device |
 | `device_from_key` | Kafka only: the record key is the device |
@@ -38,7 +39,7 @@ Each source is something a tap reads, or a hop a service marks itself. A source'
 | `reason_header` | Dead letters: the Kafka header that says why |
 | `window_header` | Aggregates: the Kafka header carrying the window record |
 
-Set exactly one of `device_from_topic`, `device_field`, `device_header` and `device_from_key`, and exactly one of `seq_field`, `seq_from` and `time_field`. Hook sources take only `name`, `kind` and `match`; the service passes the device and sequence number itself. Aggregate sources take no device, sequence or schema fields.
+Set exactly one of `device_from_topic`, `device_field`, `device_header` and `device_from_key`, and exactly one of `seq_field`, `seq_from` and `time_field`. Hook sources take only `name`, `kind` and `match`; the service passes the device and sequence number itself. Device sources take `name`, `kind`, `match`, `topic` and `device_from_topic`; see [Device marks](#device-marks). Aggregate sources take no device, sequence or schema fields.
 
 A payload that breaks its declared schema becomes a hop event with `op: error` and a short reason, such as `pressure_kpa: got string, want number`. The reading still counts as having reached the hop.
 
@@ -75,6 +76,54 @@ Pipelines often swap the device's ID for another key on the way, such as a syste
 
 A reading whose alias is not known yet is counted as unparsed by the tap and retried by hooks. A hop that strips the message type takes `as_type`.
 
+## Device marks
+
+A device can say what it did with a reading: that it published it, or that it
+kept it while offline. It does so in a small JSON message on its own MQTT
+topic, which the tap reads and turns into a hop event. The device sends no
+journey IDs; the tap derives them, exactly as for the reading. The C hook
+(`pkg/hook/c`) writes these messages and keeps marks while the link is down.
+
+```yaml
+sources:
+  - name: what the devices say they sent
+    kind: device
+    match: ems.sent                      # the hop is device:ems.sent
+    topic: fleet/+/from/hopwake
+    device_from_topic: fleet/{device}/from/hopwake
+route:
+  - hop: device:ems.sent
+    optional: true                       # only devices with new firmware mark
+  - hop: mqtt:fleet/+/from/ems/#
+    via: device link
+  ...
+```
+
+The device is the one its topic names, so with the usual broker ACLs (a
+device may publish only under its own prefix) a device can only mark itself.
+
+One message:
+
+```json
+{"v":1,"marks":[
+  {"hop":"ems.sent","op":"send","type":"ems.measurements.Measurement","time":1763460000750,"at":1763460000900},
+  {"hop":"meter.sent","op":"store","seq":1683,"boot":"7"}
+],"dropped":0}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `hop` | The `match` of a device source whose `topic` this message came on |
+| `op` | `send` (the device published the reading) or `store` (it kept it, for example while offline) |
+| `type`, `time` | A reading known by its message type and its own time, in Unix milliseconds, as `time_field` finds it on the reading |
+| `seq`, `boot` | A reading with a sequence number (and boot counter) instead |
+| `at` | When the device did it, in Unix milliseconds. Used for the event's time when it lies within the last 24 hours of the tap's clock; otherwise the tap uses the time it received the message |
+| `dropped` | Marks the device had to throw away since its last message, because its queue was full |
+
+A device that marks its sends is judged from the device: when its readings
+are marked sent but never reach the broker, Hopwake says they stop at the
+`via` of the MQTT hop (above, the device link), not that the device is silent.
+
 ## Route
 
 The hops every reading should reach, in order:
@@ -101,7 +150,7 @@ route:
 | `hop` | A source's hop name, or a span rule's hop |
 | `via` | The service that carries readings here from the hop before; stops are reported at it |
 | `mapping` | How that service maps fields, as a person confirmed it: output field, then an input field optionally followed by `+ - * /` and a number |
-| `optional` | Happens only on demand (serving a reading to someone who asks). Shown when it happens, never a reason for a stop. Optional hops come last. |
+| `optional` | At the end of a route: happens only on demand (serving a reading to someone who asks); shown when it happens, never a reason for a stop. At the start: a hop only some devices report, such as their own marks; a device that reports it is judged from it. Optional hops come first or last, around at least one required hop. |
 
 A step may also be written as just the hop name.
 

@@ -110,6 +110,22 @@ func (r TypedRoute) RequiredHops() []string {
 	return out
 }
 
+// JudgedHops returns the hops a device's readings are judged on: the
+// required hops, preceded by the leading optional hops the device reports
+// (reported says whether it does).
+func (r TypedRoute) JudgedHops(reported func(hop string) bool) []string {
+	var out []string
+	for _, s := range r.Steps {
+		if !s.Optional {
+			break
+		}
+		if reported != nil && reported(s.Hop) {
+			out = append(out, s.Hop)
+		}
+	}
+	return append(out, r.RequiredHops()...)
+}
+
 // Optional returns the route's optional hops.
 func (r TypedRoute) Optional() []string {
 	out := []string{}
@@ -193,9 +209,11 @@ type Step struct {
 	// Mapping is how the service maps fields from the previous hop, as a
 	// person confirmed it: output field → "input", "input + 273.15", ...
 	Mapping map[string]string `yaml:"mapping"`
-	// Optional steps happen only on demand, such as serving a reading to
-	// someone who asks for it. They are shown when they happen but never
-	// make a verdict; they can only come at the end of the route.
+	// Optional steps at the end of a route happen only on demand, such as
+	// serving a reading to someone who asks for it. They are shown when they
+	// happen but never make a verdict. Optional steps at the start are hops
+	// only some devices report, such as a device marking its own sends: a
+	// device is judged from them once it has reported one.
 	Optional bool `yaml:"optional"`
 }
 
@@ -270,8 +288,9 @@ func (s Source) HopName() string { return s.Kind + ":" + s.Match }
 // Source is one kind of message a tap reads.
 type Source struct {
 	Name            string `yaml:"name"`
-	Kind            string `yaml:"kind"`  // "mqtt" or "kafka"
-	Match           string `yaml:"match"` // MQTT topic filter, or Kafka topic name
+	Kind            string `yaml:"kind"`  // "mqtt", "kafka", "hook" or "device"
+	Match           string `yaml:"match"` // MQTT topic filter, Kafka topic name, or the name of a hook or device hop
+	Topic           string `yaml:"topic"` // device sources: the MQTT topic filter device marks arrive on
 	DeviceFromTopic string `yaml:"device_from_topic"`
 	DeviceField     string `yaml:"device_field"`
 	SeqField        string `yaml:"seq_field"`
@@ -401,12 +420,29 @@ func (c *Config) check() error {
 	for i, s := range c.Sources {
 		where := fmt.Sprintf("source %d (%s)", i+1, s.Name)
 		switch s.Kind {
-		case "mqtt", "kafka", "hook":
+		case "mqtt", "kafka", "hook", "device":
 		default:
-			return fmt.Errorf("%s: kind must be mqtt, kafka or hook, not %q", where, s.Kind)
+			return fmt.Errorf("%s: kind must be mqtt, kafka, hook or device, not %q", where, s.Kind)
 		}
 		if s.Match == "" {
 			return fmt.Errorf("%s: match is required", where)
+		}
+		if s.Kind == "device" {
+			// Devices mark their own sends in small messages on their own
+			// MQTT topic; the device is the one the topic names.
+			if s.Topic == "" || strings.Count(s.DeviceFromTopic, "{device}") != 1 {
+				return fmt.Errorf("%s: a device source needs topic and device_from_topic with {device} once", where)
+			}
+			if !topicMatches(s.Topic, strings.Replace(s.DeviceFromTopic, "{device}", "x", 1)) {
+				return fmt.Errorf("%s: device_from_topic %q does not fit topic %q", where, s.DeviceFromTopic, s.Topic)
+			}
+			if s.DeviceField != "" || s.SeqField != "" || s.TimeField != "" || s.Role != "" || s.Schema != "" || s.Format != "" || s.DeviceHeader != "" || s.SeqFrom != "" {
+				return fmt.Errorf("%s: a device source takes only a name, match, topic and device_from_topic", where)
+			}
+			continue
+		}
+		if s.Topic != "" {
+			return fmt.Errorf("%s: topic only applies to device sources", where)
 		}
 		if s.Kind == "hook" {
 			// A service in the pipeline marks readings itself, with the device
@@ -553,6 +589,22 @@ func (c *Config) check() error {
 	return nil
 }
 
+// DeviceSources returns the device sources whose marks arrive on topic, and
+// the device the topic names.
+func (c *Config) DeviceSources(topic string) (srcs []Source, device string) {
+	for _, s := range c.Sources {
+		if s.Kind != "device" || !topicMatches(s.Topic, topic) {
+			continue
+		}
+		d, ok := deviceFromTopic(s.DeviceFromTopic, topic)
+		if !ok || d == "" {
+			continue
+		}
+		srcs, device = append(srcs, s), d
+	}
+	return srcs, device
+}
+
 // Source returns the source a message on a topic belongs to, if any.
 func (c *Config) Source(kind, topic string) (Source, bool) {
 	for _, s := range c.Sources {
@@ -568,10 +620,23 @@ func (c *Config) Source(kind, topic string) (Source, bool) {
 
 // Rule returns the extraction rule for a message on a topic, if a source
 // of that kind matches it. The first matching source wins.
+// required reports whether any of the steps is required.
+func required(steps []Step) bool {
+	for _, s := range steps {
+		if !s.Optional {
+			return true
+		}
+	}
+	return false
+}
+
 // checkSteps checks one route's steps.
 func checkSteps(where string, steps []Step, known map[string]bool) error {
 	if len(steps) == 0 {
 		return fmt.Errorf("%s: no steps", where)
+	}
+	if !required(steps) {
+		return fmt.Errorf("%s: at least one hop must be required", where)
 	}
 	seen := map[string]bool{}
 	for i, st := range steps {
@@ -579,11 +644,10 @@ func checkSteps(where string, steps []Step, known map[string]bool) error {
 		if i == 0 && (st.Via != "" || len(st.Mapping) > 0) {
 			return fmt.Errorf("%s: the first hop %q has nothing before it, so it cannot have via or mapping", where, h)
 		}
-		if st.Optional && i == 0 {
-			return fmt.Errorf("%s: the first hop %q cannot be optional", where, h)
-		}
-		if !st.Optional && i > 0 && steps[i-1].Optional {
-			return fmt.Errorf("%s: %q follows an optional hop; optional hops come last", where, h)
+		// Optional hops come first (hops only some devices report) or last
+		// (hops that happen on demand), around at least one required hop.
+		if !st.Optional && i > 0 && steps[i-1].Optional && required(steps[:i]) {
+			return fmt.Errorf("%s: %q follows an optional hop; optional hops come first or last", where, h)
 		}
 		for f, x := range st.Mapping {
 			if _, err := mapping.ParseExpr(x); err != nil {

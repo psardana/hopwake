@@ -963,8 +963,15 @@ func (s *server) aliases(w http.ResponseWriter, r *http.Request) {
 
 // judge works out one route's verdict for a device.
 func (s *server) judge(device string, rt journey.TypedRoute, js []verdict.Journey, now time.Time, lastSeen *verdict.HopTime, blind map[string]*verdict.Blind) verdict.Verdict {
-	hops := rt.Hops()
-	v := verdict.Decide(device, rt.RequiredHops(), js, now, s.grace, lastSeen)
+	// A device that marks its own sends is judged from the device.
+	reported := map[string]bool{}
+	for _, j := range js {
+		for _, h := range j.Hops {
+			reported[h.Hop] = true
+		}
+	}
+	judged := rt.JudgedHops(func(h string) bool { return reported[h] })
+	v := verdict.Decide(device, judged, js, now, s.grace, lastSeen)
 	v.At(device, viaOf(rt)[v.NotReached])
 	switch v.State {
 	case verdict.Stopped:
@@ -972,11 +979,11 @@ func (s *server) judge(device string, rt journey.TypedRoute, js []verdict.Journe
 			v.Hold(device, blind[v.NotReached], now, s.grace)
 		}
 	case verdict.Silent:
-		v.Hold(device, blind[hops[0]], now, s.grace)
+		v.Hold(device, blind[judged[0]], now, s.grace)
 	case verdict.OK:
 		// Healthy on readings from before the tap went blind: nothing seen
 		// since, so nothing to say until it is back.
-		if b := blind[hops[0]]; b.Recent(now, s.grace) && len(js) > 0 && js[0].First.Before(b.From) {
+		if b := blind[judged[0]]; b.Recent(now, s.grace) && len(js) > 0 && js[0].First.Before(b.From) {
 			v.Wait(device, b)
 		}
 	}
@@ -1063,7 +1070,7 @@ func blindList(m map[string]*verdict.Blind) []*verdict.Blind {
 
 // quick judges one route of one device from its last sightings.
 func (s *server) quick(device string, rt journey.TypedRoute, seen map[string]time.Time, now time.Time, blind map[string]*verdict.Blind) fleetDevice {
-	hops := rt.RequiredHops()
+	hops := rt.JudgedHops(func(h string) bool { _, ok := seen[h]; return ok })
 	state, after := verdict.Quick(hops, seen, now, s.grace, s.grace+45*time.Second)
 	// A stop just before a hop the tap was not watching, or silence while it
 	// was not watching the first hop, may be the tap's own doing.
