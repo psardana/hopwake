@@ -1,0 +1,3 @@
+# The tap may read the device topics, and nothing else; it may not publish.
+user hopwake-tap
+topic read plant/#

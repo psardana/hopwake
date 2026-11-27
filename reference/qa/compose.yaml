@@ -1,0 +1,186 @@
+# A broker and a cluster locked down the way a QA or production one is, to
+# show the tap needs no more than read rights, and how much it can read.
+#
+#   scripts/qa-tap.sh            builds, starts, checks the rights, runs the load steps
+#
+# MQTT: devices and the bridge use the inside listener; the tap comes in over
+# TLS with a password, as hopwake-tap, which may only read plant/#.
+# Kafka: the bridge uses the inside listener; the tap logs in with SCRAM as
+# hopwake-tap, which may only read and describe telemetry.raw, and reads
+# without a consumer group, so it needs no group rights and commits nothing.
+#
+# The passwords here are throwaway values for this local rig.
+name: hopwake-qa
+
+x-go: &go
+  restart: on-failure
+
+services:
+  certs:
+    image: alpine:3.22
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        [ -f /certs/broker.pem ] && exit 0
+        apk add --no-cache openssl >/dev/null
+        cd /certs
+        openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj "/CN=hopwake-qa-ca" -keyout ca.key -out ca.pem 2>/dev/null
+        openssl req -newkey rsa:2048 -nodes -subj "/CN=mosquitto" -keyout broker.key -out broker.csr 2>/dev/null
+        printf 'subjectAltName=DNS:mosquitto,DNS:localhost\n' > ext.cnf
+        openssl x509 -req -in broker.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 30 -extfile ext.cnf -out broker.pem 2>/dev/null
+        chmod 644 broker.key
+    volumes:
+      - certs:/certs
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0.20
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mosquitto_passwd -c -b /mosquitto/data/passwd hopwake-tap qa-tap-password
+        chown mosquitto /mosquitto/data/passwd; chmod 600 /mosquitto/data/passwd
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./acl:/mosquitto/config/acl:ro
+      - certs:/certs:ro
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:4.0.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://:29092,TAP://:29093,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,TAP://kafka:29093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,TAP:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_TAP_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      # listener.name.tap.scram-sha-512.sasl.jaas.config ("___" stands for "-")
+      KAFKA_LISTENER_NAME_TAP_SCRAM___SHA___512_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required;
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      # Inside, everything is trusted; on the tap's listener only ACLs count.
+      KAFKA_SUPER_USERS: User:ANONYMOUS
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: 6
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:29092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  kafka-setup:
+    image: apache/kafka:4.0.0
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        B="--bootstrap-server kafka:29092"
+        /opt/kafka/bin/kafka-topics.sh $$B --create --if-not-exists --topic telemetry.raw --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-configs.sh $$B --alter --add-config 'SCRAM-SHA-512=[iterations=4096,password=qa-tap-password]' --entity-type users --entity-name hopwake-tap
+        /opt/kafka/bin/kafka-acls.sh $$B --add --allow-principal User:hopwake-tap --operation Read --operation Describe --topic telemetry.raw
+        # Only for taps that split partitions in a group (TAP_GROUP=hopwake-tap):
+        /opt/kafka/bin/kafka-acls.sh $$B --add --allow-principal User:hopwake-tap --operation Read --group hopwake-tap
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  bridge:
+    <<: *go
+    build: {context: ../.., dockerfile: reference/go.Dockerfile, args: {CMD: bridge}}
+    environment:
+      BRIDGE_MQTT: tcp://mosquitto:1883
+      BRIDGE_KAFKA: kafka:29092
+      OTEL_SDK_DISABLED: "true"
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+
+  devices:
+    <<: *go
+    build: {context: ../.., dockerfile: reference/go.Dockerfile, args: {CMD: devicesim}}
+    command: ["-broker", "tcp://mosquitto:1883", "-devices", "${DEVICES:-1000}", "-interval", "${INTERVAL:-5s}", "-conns", "${CONNS:-20}", "-qos", "0"]
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+
+  # Stands in for Hopwake's collector: counts the tap's hop events.
+  sink:
+    <<: *go
+    build: {context: ../.., dockerfile: reference/go.Dockerfile, args: {CMD: otlpsink}}
+    command: ["-every", "10s"]
+
+  tap:
+    <<: *go
+    build: {context: ../.., dockerfile: deploy/go.Dockerfile, args: {CMD: tap}}
+    environment:
+      TAP_RULES: /etc/hopwake/rules.yaml
+      TAP_MQTT: ssl://mosquitto:8883
+      TAP_MQTT_USER: hopwake-tap
+      TAP_MQTT_PASSWORD: qa-tap-password
+      TAP_MQTT_CA: /certs/ca.pem
+      TAP_MQTT_SHARE: ${TAP_MQTT_SHARE:-}
+      TAP_KAFKA: kafka:29093
+      TAP_KAFKA_SASL: SCRAM-SHA-512
+      TAP_KAFKA_USER: hopwake-tap
+      TAP_KAFKA_PASSWORD: qa-tap-password
+      TAP_GROUP: ${TAP_GROUP:-none}
+      TAP_SAMPLE: ${TAP_SAMPLE:-1}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://sink:4318
+    volumes:
+      - ./rules.yaml:/etc/hopwake/rules.yaml:ro
+      - certs:/certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+
+  # A second tap, for splitting the load: both join the MQTT shared
+  # subscription and the Kafka group (scripts/qa-tap.sh, last step).
+  tap-b:
+    <<: *go
+    profiles: ["two-taps"]
+    build: {context: ../.., dockerfile: deploy/go.Dockerfile, args: {CMD: tap}}
+    environment:
+      TAP_RULES: /etc/hopwake/rules.yaml
+      TAP_MQTT: ssl://mosquitto:8883
+      TAP_MQTT_USER: hopwake-tap
+      TAP_MQTT_PASSWORD: qa-tap-password
+      TAP_MQTT_CA: /certs/ca.pem
+      TAP_MQTT_SHARE: ${TAP_MQTT_SHARE:-}
+      TAP_KAFKA: kafka:29093
+      TAP_KAFKA_SASL: SCRAM-SHA-512
+      TAP_KAFKA_USER: hopwake-tap
+      TAP_KAFKA_PASSWORD: qa-tap-password
+      TAP_GROUP: ${TAP_GROUP:-none}
+      TAP_SAMPLE: ${TAP_SAMPLE:-1}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://sink:4318
+    volumes:
+      - ./rules.yaml:/etc/hopwake/rules.yaml:ro
+      - certs:/certs:ro
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      kafka-setup:
+        condition: service_completed_successfully
+
+volumes:
+  certs:

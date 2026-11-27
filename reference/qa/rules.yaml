@@ -1,0 +1,17 @@
+# Rules for the read-only tap rig: the reference readings on MQTT and Kafka.
+tenant: reference
+sources:
+  - name: raw readings
+    kind: mqtt
+    match: plant/+/+/telemetry
+    device_from_topic: plant/+/{device}/telemetry
+    seq_field: seq
+  - name: raw readings in Kafka
+    kind: kafka
+    match: telemetry.raw
+    device_field: device_id
+    seq_field: seq
+route:
+  - hop: mqtt:plant/+/+/telemetry
+  - hop: kafka:telemetry.raw
+    via: bridge
