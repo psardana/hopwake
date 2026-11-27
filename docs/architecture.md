@@ -30,7 +30,7 @@ Devices ──► MQTT broker ──► bridge ──► Kafka ──► service
 | Component | Responsibility |
 | --- | --- |
 | MQTT tap | Shared subscription on chosen topics; emits a hop event or a counter per message |
-| Kafka tap | Separate consumer group; header aware; emits hop events |
+| Kafka tap | Its own consumer group, or none (read rights only, see [tap.md](tap.md)); header aware; emits hop events |
 | Job plugins | Emit a window record for each aggregate a stream job produces |
 | Service SDK | Adds device ID and journey ID to ordinary OpenTelemetry spans |
 | API hook | Records that a device's data was served to an app |

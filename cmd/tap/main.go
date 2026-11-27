@@ -14,7 +14,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"flag"
 	"fmt"
@@ -34,6 +37,9 @@ import (
 	"github.com/eclipse/paho.golang/autopaho"
 	"github.com/eclipse/paho.golang/paho"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl"
+	"github.com/twmb/franz-go/pkg/sasl/plain"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -115,13 +121,27 @@ func main() {
 	rulesPath := flag.String("rules", env("TAP_RULES", "reference/journey-rules.yaml"), "journey ID rules")
 	broker := flag.String("mqtt", env("TAP_MQTT", ""), "MQTT broker URL; empty skips MQTT sources")
 	brokers := flag.String("kafka", env("TAP_KAFKA", ""), "Kafka bootstrap servers; empty skips Kafka sources")
-	group := flag.String("group", env("TAP_GROUP", "hopwake-tap"), "Kafka consumer group of the tap")
+	group := flag.String("group", env("TAP_GROUP", "hopwake-tap"), `Kafka consumer group of the tap; "none" reads without one, needing only read rights`)
 	every := flag.Duration("health-every", 5*time.Second, "how often the tap reports its own health per hop")
 	queue := flag.Int("mqtt-queue", 20000, "MQTT messages the tap may hold before it drops and counts them")
 	sample := flag.Uint64("sample", envUint("TAP_SAMPLE", 1), "send hop events for one reading in N (counters always cover all); watched devices, rejections and schema breaks are always sent")
 	countsEvery := flag.Duration("counts-every", 5*time.Second, "how often the tap sends per-device counters")
 	control := flag.String("control", env("TAP_CONTROL", ""), "journey service URL to read the watch list from; empty captures no payloads")
+	// Reading a production broker and cluster: credentials, TLS, and ways
+	// to need no more than read rights.
+	mqttUser := flag.String("mqtt-user", env("TAP_MQTT_USER", ""), "MQTT username")
+	mqttCA := flag.String("mqtt-ca", env("TAP_MQTT_CA", ""), "PEM file of the CA that signed the broker's certificate, for mqtts:// or ssl:// brokers")
+	mqttShare := flag.String("mqtt-share", env("TAP_MQTT_SHARE", ""), "subscribe as a member of this MQTT 5 shared subscription group, so several taps split the messages")
+	kafkaSASL := flag.String("kafka-sasl", env("TAP_KAFKA_SASL", ""), "Kafka SASL mechanism: PLAIN, SCRAM-SHA-256 or SCRAM-SHA-512; empty for none")
+	kafkaUser := flag.String("kafka-user", env("TAP_KAFKA_USER", ""), "Kafka SASL username")
+	kafkaTLS := flag.Bool("kafka-tls", env("TAP_KAFKA_TLS", "") == "true", "connect to Kafka over TLS")
+	kafkaCA := flag.String("kafka-ca", env("TAP_KAFKA_CA", ""), "PEM file of the CA that signed the brokers' certificates")
 	flag.Parse()
+	if *group == "none" {
+		*group = ""
+	}
+	// Passwords only from the environment, never on the command line.
+	mqttPassword, kafkaPassword := os.Getenv("TAP_MQTT_PASSWORD"), os.Getenv("TAP_KAFKA_PASSWORD")
 
 	rules, err := journey.LoadConfig(*rulesPath)
 	if err != nil {
@@ -413,20 +433,37 @@ func main() {
 		}
 		subs := make([]paho.SubscribeOptions, 0, len(mqttFilters))
 		for _, f := range mqttFilters {
+			if *mqttShare != "" {
+				f = "$share/" + *mqttShare + "/" + f
+			}
 			subs = append(subs, paho.SubscribeOptions{Topic: f, QoS: 0}) // QoS 0: the tap must never slow the broker down
+		}
+		tlsCfg, err := tlsConfig(*mqttCA)
+		if err != nil {
+			log.Fatalf("mqtt: %v", err)
 		}
 		// MQTT 5, so the tap sees user properties such as a message type.
 		cm, err := autopaho.NewConnection(ctx, autopaho.ClientConfig{
 			ServerUrls:                    []*url.URL{u},
+			TlsCfg:                        tlsCfg,
+			ConnectUsername:               *mqttUser,
+			ConnectPassword:               []byte(mqttPassword),
 			KeepAlive:                     30,
 			CleanStartOnInitialConnection: true,
 			SessionExpiryInterval:         0,
 			ReconnectBackoff:              autopaho.NewConstantBackoff(2 * time.Second),
 			OnConnectionUp: func(cm *autopaho.ConnectionManager, _ *paho.Connack) {
 				go func() {
-					if _, err := cm.Subscribe(ctx, &paho.Subscribe{Subscriptions: subs}); err != nil {
+					ack, err := cm.Subscribe(ctx, &paho.Subscribe{Subscriptions: subs})
+					if err != nil {
 						log.Printf("mqtt subscribe: %v", err)
 						return
+					}
+					// A broker that refuses a filter (no read right) says so per filter.
+					for i, code := range ack.Reasons {
+						if code >= 0x80 && i < len(subs) {
+							log.Printf("mqtt: the broker refused %s (reason 0x%02x); check the tap's read rights", subs[i].Topic, code)
+						}
 					}
 					mqttUp.Store(true)
 					log.Printf("mqtt: watching %s", strings.Join(mqttFilters, ", "))
@@ -439,7 +476,9 @@ func main() {
 			},
 			OnConnectError: func(err error) { log.Printf("mqtt: %v", err) },
 			ClientConfig: paho.ClientConfig{
-				ClientID: fmt.Sprintf("hopwake-tap-%d", os.Getpid()),
+				// Unique per tap: in containers every tap is pid 1, and two
+				// clients with one ID make the broker drop each in turn.
+				ClientID: env("TAP_MQTT_CLIENT_ID", mqttClientID()),
 				OnPublishReceived: []func(paho.PublishReceived) (bool, error){func(pr paho.PublishReceived) (bool, error) {
 					p := pr.Packet
 					var props paho.UserProperties
@@ -470,18 +509,51 @@ func main() {
 	}
 
 	if *brokers != "" && len(kafkaTopics) > 0 {
-		kc, err := kgo.NewClient(
+		opts := []kgo.Opt{
 			kgo.SeedBrokers(strings.Split(*brokers, ",")...),
-			kgo.ConsumerGroup(*group),
 			kgo.ConsumeTopics(kafkaTopics...),
 			kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()),
-			kgo.OnPartitionsAssigned(func(context.Context, *kgo.Client, map[string][]int32) { kafkaUp.Store(true) }),
-		)
+		}
+		if *group != "" {
+			opts = append(opts, kgo.ConsumerGroup(*group),
+				kgo.OnPartitionsAssigned(func(context.Context, *kgo.Client, map[string][]int32) { kafkaUp.Store(true) }))
+		}
+		// Without a group the tap reads every partition itself and commits
+		// nothing: it needs only read and describe rights on the topics.
+		if m, err := saslMechanism(*kafkaSASL, *kafkaUser, kafkaPassword); err != nil {
+			log.Fatalf("kafka: %v", err)
+		} else if m != nil {
+			opts = append(opts, kgo.SASL(m))
+		}
+		if *kafkaTLS || *kafkaCA != "" {
+			cfg, err := tlsConfig(*kafkaCA)
+			if err != nil {
+				log.Fatalf("kafka: %v", err)
+			}
+			if cfg == nil {
+				cfg = &tls.Config{MinVersion: tls.VersionTLS12}
+			}
+			opts = append(opts, kgo.DialTLSConfig(cfg))
+		}
+		kc, err := kgo.NewClient(opts...)
 		if err != nil {
 			log.Fatalf("kafka: %v", err)
 		}
 		defer kc.Close()
-		log.Printf("kafka: watching %s in group %s", strings.Join(kafkaTopics, ", "), *group)
+		if *group == "" {
+			log.Printf("kafka: watching %s without a consumer group, committing nothing", strings.Join(kafkaTopics, ", "))
+			go func() {
+				for ctx.Err() == nil && !kafkaUp.Load() {
+					if err := kc.Ping(ctx); err == nil {
+						kafkaUp.Store(true)
+						return
+					}
+					time.Sleep(2 * time.Second)
+				}
+			}()
+		} else {
+			log.Printf("kafka: watching %s in group %s", strings.Join(kafkaTopics, ", "), *group)
+		}
 		go func() {
 			for ctx.Err() == nil {
 				fetches := kc.PollFetches(ctx)
@@ -589,6 +661,53 @@ func logTotals(hl *health) {
 		parts = append(parts, fmt.Sprintf("%s %d (missed %d)", h, hl.hops[h].totalSeen, hl.hops[h].totalMissed))
 	}
 	log.Printf("hop events since start: %s", strings.Join(parts, ", "))
+}
+
+// mqttClientID names the tap's MQTT client after its host, its process and
+// a random suffix, so taps never share an ID.
+func mqttClientID() string {
+	host, _ := os.Hostname()
+	var b [4]byte
+	_, _ = rand.Read(b[:])
+	id := fmt.Sprintf("hopwake-tap-%s-%d-%s", host, os.Getpid(), hex.EncodeToString(b[:]))
+	if len(id) > 64 {
+		id = id[len(id)-64:]
+	}
+	return id
+}
+
+// tlsConfig trusts the CA in caFile as well as the system's; nil without one.
+func tlsConfig(caFile string) (*tls.Config, error) {
+	if caFile == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%s holds no PEM certificate", caFile)
+	}
+	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+}
+
+// saslMechanism returns the Kafka SASL mechanism to log in with; nil for none.
+func saslMechanism(name, user, password string) (sasl.Mechanism, error) {
+	switch strings.ToUpper(name) {
+	case "":
+		return nil, nil
+	case "PLAIN":
+		return plain.Auth{User: user, Pass: password}.AsMechanism(), nil
+	case "SCRAM-SHA-256":
+		return scram.Auth{User: user, Pass: password}.AsSha256Mechanism(), nil
+	case "SCRAM-SHA-512":
+		return scram.Auth{User: user, Pass: password}.AsSha512Mechanism(), nil
+	}
+	return nil, fmt.Errorf("unknown SASL mechanism %q", name)
 }
 
 // sampled decides from the journey ID whether a reading's hop events are
