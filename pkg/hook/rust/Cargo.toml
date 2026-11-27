@@ -1,0 +1,16 @@
+[package]
+name = "hopwake-hook"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Hopwake hook for Rust services: marks readings stored or served at hops no tap can watch."
+
+[lib]
+name = "hopwake_hook"
+path = "src/lib.rs"
+
+[dependencies]
+getrandom = "0.3"
+serde_json = "1"
+sha2 = "0.10"
+ureq = "3"
