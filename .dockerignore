@@ -5,3 +5,10 @@ dist
 **/target
 **/__pycache__
 reference/data
+**/obj
+pkg/hook/dotnet/**/bin
+pkg/hook/c/build
+pkg/hook/rust/target
+scenarios/**/target
+scenarios/**/bin
+scenarios/**/obj
