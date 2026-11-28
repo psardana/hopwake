@@ -81,3 +81,15 @@ func TestHealthCounts(t *testing.T) {
 		t.Fatalf("interval not reset, or totals lost: %+v", again)
 	}
 }
+
+func TestTLSConfigNeedsBothHalvesOfACertificate(t *testing.T) {
+	if cfg, err := tlsConfig("", "", ""); cfg != nil || err != nil {
+		t.Fatalf("no TLS settings gave %v, %v", cfg, err)
+	}
+	if _, err := tlsConfig("", "client.pem", ""); err == nil {
+		t.Fatal("a certificate without its key was accepted")
+	}
+	if _, err := tlsConfig("/nonexistent/ca.pem", "", ""); err == nil {
+		t.Fatal("a missing CA file was accepted")
+	}
+}

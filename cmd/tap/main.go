@@ -136,6 +136,12 @@ func main() {
 	kafkaUser := flag.String("kafka-user", env("TAP_KAFKA_USER", ""), "Kafka SASL username")
 	kafkaTLS := flag.Bool("kafka-tls", env("TAP_KAFKA_TLS", "") == "true", "connect to Kafka over TLS")
 	kafkaCA := flag.String("kafka-ca", env("TAP_KAFKA_CA", ""), "PEM file of the CA that signed the brokers' certificates")
+	// Client certificates, for brokers that authenticate clients by TLS
+	// (Strimzi users of type tls, Mosquitto with require_certificate).
+	mqttCert := flag.String("mqtt-cert", env("TAP_MQTT_CERT", ""), "PEM client certificate for MQTT; needs -mqtt-key")
+	mqttKey := flag.String("mqtt-key", env("TAP_MQTT_KEY", ""), "PEM private key of the MQTT client certificate")
+	kafkaCert := flag.String("kafka-cert", env("TAP_KAFKA_CERT", ""), "PEM client certificate for Kafka; needs -kafka-key")
+	kafkaKey := flag.String("kafka-key", env("TAP_KAFKA_KEY", ""), "PEM private key of the Kafka client certificate")
 	flag.Parse()
 	if *group == "none" {
 		*group = ""
@@ -438,7 +444,7 @@ func main() {
 			}
 			subs = append(subs, paho.SubscribeOptions{Topic: f, QoS: 0}) // QoS 0: the tap must never slow the broker down
 		}
-		tlsCfg, err := tlsConfig(*mqttCA)
+		tlsCfg, err := tlsConfig(*mqttCA, *mqttCert, *mqttKey)
 		if err != nil {
 			log.Fatalf("mqtt: %v", err)
 		}
@@ -525,8 +531,8 @@ func main() {
 		} else if m != nil {
 			opts = append(opts, kgo.SASL(m))
 		}
-		if *kafkaTLS || *kafkaCA != "" {
-			cfg, err := tlsConfig(*kafkaCA)
+		if *kafkaTLS || *kafkaCA != "" || *kafkaCert != "" {
+			cfg, err := tlsConfig(*kafkaCA, *kafkaCert, *kafkaKey)
 			if err != nil {
 				log.Fatalf("kafka: %v", err)
 			}
@@ -676,23 +682,38 @@ func mqttClientID() string {
 	return id
 }
 
-// tlsConfig trusts the CA in caFile as well as the system's; nil without one.
-func tlsConfig(caFile string) (*tls.Config, error) {
-	if caFile == "" {
+// tlsConfig trusts the CA in caFile as well as the system's, and presents
+// the client certificate in certFile and keyFile; nil when none is given.
+func tlsConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
+	if caFile == "" && certFile == "" && keyFile == "" {
 		return nil, nil
 	}
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, err
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if caFile != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, err
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("%s holds no PEM certificate", caFile)
+		}
+		cfg.RootCAs = pool
 	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
+	if certFile != "" || keyFile != "" {
+		if certFile == "" || keyFile == "" {
+			return nil, fmt.Errorf("a client certificate needs both its certificate and its key")
+		}
+		pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Certificates = []tls.Certificate{pair}
 	}
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("%s holds no PEM certificate", caFile)
-	}
-	return &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}, nil
+	return cfg, nil
 }
 
 // saslMechanism returns the Kafka SASL mechanism to log in with; nil for none.

@@ -12,6 +12,7 @@ that on a broker and cluster that are locked down.
 | MQTT username | `-mqtt-user` | `TAP_MQTT_USER` |
 | MQTT password | | `TAP_MQTT_PASSWORD` |
 | CA that signed the broker's certificate (PEM), when not a public one | `-mqtt-ca` | `TAP_MQTT_CA` |
+| MQTT client certificate and key (PEM), for brokers that check client certificates | `-mqtt-cert`, `-mqtt-key` | `TAP_MQTT_CERT`, `TAP_MQTT_KEY` |
 | Join an MQTT 5 shared subscription group, so several taps split the messages | `-mqtt-share` | `TAP_MQTT_SHARE` |
 | Kafka bootstrap servers | `-kafka` | `TAP_KAFKA` |
 | Kafka SASL mechanism: `PLAIN`, `SCRAM-SHA-256` or `SCRAM-SHA-512` | `-kafka-sasl` | `TAP_KAFKA_SASL` |
@@ -19,6 +20,7 @@ that on a broker and cluster that are locked down.
 | Kafka password | | `TAP_KAFKA_PASSWORD` |
 | Kafka over TLS | `-kafka-tls` | `TAP_KAFKA_TLS=true` |
 | CA that signed the brokers' certificates (PEM) | `-kafka-ca` | `TAP_KAFKA_CA` |
+| Kafka client certificate and key (PEM), for clusters that authenticate by TLS, such as Strimzi users of type `tls` | `-kafka-cert`, `-kafka-key` | `TAP_KAFKA_CERT`, `TAP_KAFKA_KEY` |
 | Kafka consumer group; `none` reads without one | `-group` | `TAP_GROUP` |
 | Send hop events for one reading in N (counters always cover all) | `-sample` | `TAP_SAMPLE` |
 
