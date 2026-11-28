@@ -67,6 +67,12 @@ type message struct {
 	Type     string        `yaml:"type"`
 	Every    time.Duration `yaml:"every"`
 	Template string        `yaml:"template"` // JSON, a Go text/template
+	Numbers  [2]int        `yaml:"numbers"`  // only these devices send it, numbers from and to inclusive; unset: all
+}
+
+// sentBy reports whether device number n sends m.
+func (m message) sentBy(n int) bool {
+	return m.Numbers == [2]int{} || (n >= m.Numbers[0] && n <= m.Numbers[1])
 }
 
 // fault changes what some devices send from a moment on.
@@ -156,6 +162,9 @@ func main() {
 			}()
 		}
 		for _, m := range cfg.Messages {
+			if !m.sentBy(n) {
+				continue
+			}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
