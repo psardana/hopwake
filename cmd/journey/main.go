@@ -277,7 +277,7 @@ func main() {
 	span := flag.Duration("journey-span", 60*time.Second, "events with the same journey ID further apart than this are different readings (a device reboot restarts its sequence)")
 	fleetPath := flag.String("fleet", env("JOURNEY_FLEET", ""), "file listing the devices that should report, one per line (optional)")
 	keepFlag := flag.String("retention", env("HOPWAKE_RETENTION", "30d"), "how long hop events, counters and tap health are kept, and the longest window the view offers: 30d, 72h, …")
-	rawFlag := flag.String("raw-retention", env("HOPWAKE_RAW_RETENTION", "3d"), "how long the raw spans are kept; the view never reads them, so this can be short")
+	rawFlag := flag.String("raw-retention", env("HOPWAKE_RAW_RETENTION", "1d"), "how long the raw spans are kept; only the views that copy them into hop events read them, so a day is enough")
 	payloadFlag := flag.String("payload-retention", env("HOPWAKE_PAYLOAD_RETENTION", "24h"), "how long payloads captured in watch mode are kept")
 	flag.Parse()
 	keep, err := parseRetention(*keepFlag)
