@@ -48,8 +48,10 @@ var schema = []string{
 		message_type LowCardinality(String),
 		alias String
 	) ENGINE = MergeTree
+	PARTITION BY toDate(ts)
 	ORDER BY (tenant, device, ts)
-	TTL toDateTime(ts) + INTERVAL 3 DAY`,
+	TTL toDateTime(ts) + INTERVAL 30 DAY
+	SETTINGS ttl_only_drop_parts = 1`,
 	// Stores created by hop/v0 lack the shape column.
 	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS schema_fp LowCardinality(String)`,
 	`ALTER TABLE hop_events ADD COLUMN IF NOT EXISTS reason String`,
@@ -106,8 +108,10 @@ var schema = []string{
 		delay_ms UInt32,
 		every_ms UInt32
 	) ENGINE = MergeTree
+	PARTITION BY toDate(ts)
 	ORDER BY (tenant, hop, ts)
-	TTL toDateTime(ts) + INTERVAL 3 DAY`,
+	TTL toDateTime(ts) + INTERVAL 30 DAY
+	SETTINGS ttl_only_drop_parts = 1`,
 	`DROP VIEW IF EXISTS tap_health_mv`,
 	`CREATE MATERIALIZED VIEW tap_health_mv TO tap_health AS
 	SELECT
@@ -174,7 +178,7 @@ var schema = []string{
 		output String
 	) ENGINE = MergeTree
 	ORDER BY (tenant, group_key, window_start)
-	TTL toDateTime(ts) + INTERVAL 3 DAY`,
+	TTL toDateTime(ts) + INTERVAL 30 DAY`,
 	`DROP VIEW IF EXISTS window_records_mv`,
 	`CREATE MATERIALIZED VIEW window_records_mv TO window_records AS
 	SELECT
@@ -193,6 +197,33 @@ var schema = []string{
 		SpanAttributes['hopwake.window.output'] AS output
 	FROM otel_traces
 	WHERE SpanAttributes['hopwake.schema'] = 'window/v1'`,
+	// The last time each hop saw each device, per day: what the fleet view
+	// needs over long windows, without reading every hop event of them.
+	`CREATE TABLE IF NOT EXISTS hop_last_seen (
+		tenant LowCardinality(String),
+		day Date,
+		device String,
+		hop LowCardinality(String),
+		message_type LowCardinality(String),
+		last SimpleAggregateFunction(max, DateTime64(9)),
+		n SimpleAggregateFunction(sum, UInt64)
+	) ENGINE = AggregatingMergeTree
+	PARTITION BY day
+	ORDER BY (tenant, day, device, hop, message_type)
+	TTL day + INTERVAL 30 DAY
+	SETTINGS ttl_only_drop_parts = 1`,
+	`DROP VIEW IF EXISTS hop_last_seen_mv`,
+	`CREATE MATERIALIZED VIEW hop_last_seen_mv TO hop_last_seen AS
+	SELECT
+		SpanAttributes['hopwake.tenant'] AS tenant,
+		toDate(Timestamp) AS day,
+		SpanAttributes['hopwake.device.id'] AS device,
+		SpanAttributes['hopwake.hop'] AS hop,
+		SpanAttributes['hopwake.message.type'] AS message_type,
+		Timestamp AS last,
+		toUInt64(1) AS n
+	FROM otel_traces
+	WHERE SpanAttributes['hopwake.schema'] IN ('hop/v0', 'hop/v1')`,
 	// Every message per device, hop and five minutes, sampled or not.
 	`CREATE TABLE IF NOT EXISTS device_counters (
 		tenant LowCardinality(String),
@@ -230,11 +261,12 @@ var webFiles embed.FS
 var validID = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 type server struct {
-	db       driver.Conn
-	rules    *journey.Config
-	grace    time.Duration
-	expected []string      // devices that should report; empty when no fleet file is given
-	span     time.Duration // the longest a reading may take across all hops
+	maxWindow time.Duration // the longest window offered: the retention
+	db        driver.Conn
+	rules     *journey.Config
+	grace     time.Duration
+	expected  []string      // devices that should report; empty when no fleet file is given
+	span      time.Duration // the longest a reading may take across all hops
 }
 
 func main() {
@@ -244,12 +276,28 @@ func main() {
 	grace := flag.Duration("grace", 15*time.Second, "how long a reading may take before it is judged")
 	span := flag.Duration("journey-span", 60*time.Second, "events with the same journey ID further apart than this are different readings (a device reboot restarts its sequence)")
 	fleetPath := flag.String("fleet", env("JOURNEY_FLEET", ""), "file listing the devices that should report, one per line (optional)")
+	keepFlag := flag.String("retention", env("HOPWAKE_RETENTION", "30d"), "how long hop events, counters and tap health are kept, and the longest window the view offers: 30d, 72h, …")
+	rawFlag := flag.String("raw-retention", env("HOPWAKE_RAW_RETENTION", "3d"), "how long the raw spans are kept; the view never reads them, so this can be short")
+	payloadFlag := flag.String("payload-retention", env("HOPWAKE_PAYLOAD_RETENTION", "24h"), "how long payloads captured in watch mode are kept")
 	flag.Parse()
+	keep, err := parseRetention(*keepFlag)
+	if err != nil {
+		log.Fatalf("retention: %v", err)
+	}
+	raw, err := parseRetention(*rawFlag)
+	if err != nil {
+		log.Fatalf("raw-retention: %v", err)
+	}
+	payloads, err := parseRetention(*payloadFlag)
+	if err != nil {
+		log.Fatalf("payload-retention: %v", err)
+	}
 
 	rules, err := journey.LoadConfig(*rulesPath)
 	if err != nil {
 		log.Fatal(err)
 	}
+	ret := retention{keep: keep, raw: raw, payloads: payloads}
 	for _, rt := range rules.AllRoutes() {
 		if len(rt.Steps) < 2 {
 			log.Fatalf("route %s needs at least two hops", rt.Name)
@@ -272,9 +320,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := ensureSchema(ctx, db); err != nil {
+	if err := ensureSchema(ctx, db, ret); err != nil {
 		log.Fatal(err)
 	}
+	log.Printf("keeping hop events %s, raw spans %s, watched payloads %s", ret.keep, ret.raw, ret.payloads)
 
 	var expected []string
 	if *fleetPath != "" {
@@ -283,7 +332,7 @@ func main() {
 		}
 		log.Printf("expecting %d devices from %s", len(expected), *fleetPath)
 	}
-	s := &server{db: db, rules: rules, grace: *grace, expected: expected, span: *span}
+	s := &server{db: db, rules: rules, grace: *grace, expected: expected, span: *span, maxWindow: ret.keep}
 	mux := http.NewServeMux()
 	web, _ := fs.Sub(webFiles, "web")
 	static := http.FileServerFS(web)
@@ -324,7 +373,7 @@ func main() {
 
 // ensureSchema waits for the collector's span table, then adds the
 // device-ordered table and the view that fills it.
-func ensureSchema(ctx context.Context, db driver.Conn) error {
+func ensureSchema(ctx context.Context, db driver.Conn, ret retention) error {
 	for i := 0; ; i++ {
 		var n uint64
 		err := db.QueryRow(ctx, `SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'otel_traces'`).Scan(&n)
@@ -340,7 +389,7 @@ func ensureSchema(ctx context.Context, db driver.Conn) error {
 		case <-time.After(2 * time.Second):
 		}
 	}
-	for _, q := range schema {
+	for _, q := range append(append([]string{}, schema...), ret.statements()...) {
 		if err := db.Exec(ctx, q); err != nil {
 			return err
 		}
@@ -370,7 +419,7 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	window := 15 * time.Minute
 	if q := r.URL.Query().Get("window"); q != "" {
 		d, err := time.ParseDuration(q)
-		if err != nil || d <= 0 || d > 72*time.Hour {
+		if err != nil || d <= 0 || d > s.maxWindow {
 			http.Error(w, "bad window", http.StatusBadRequest)
 			return
 		}
@@ -683,13 +732,18 @@ type fleetDevice struct {
 	Watched      bool                 `json:"watched,omitempty"`
 }
 
+// shapeWindow bounds the fleet's search for shape changes: over a long
+// window it would read every hop event, and a change older than a day is
+// no longer news on the fleet page (a device's own page still shows it).
+const shapeWindow = 24 * time.Hour
+
 // fleet judges every device seen in the window from the last time each hop
 // saw it. Problems come first.
 func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 	window := 15 * time.Minute
 	if q := r.URL.Query().Get("window"); q != "" {
 		d, err := time.ParseDuration(q)
-		if err != nil || d <= 0 || d > 72*time.Hour {
+		if err != nil || d <= 0 || d > s.maxWindow {
 			http.Error(w, "bad window", http.StatusBadRequest)
 			return
 		}
@@ -701,14 +755,15 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 	// Counters carry no message type, so they count only for the untyped route.
 	rows, err := s.db.Query(r.Context(), `
 		SELECT device, hop, message_type, max(t) FROM (
-			SELECT device, hop, message_type, max(ts) AS t FROM hop_events
-			WHERE tenant = ? AND ts >= ?
+			SELECT device, hop, message_type, max(last) AS t FROM hop_last_seen
+			WHERE tenant = ? AND day >= toDate(?)
 			GROUP BY device, hop, message_type
+			HAVING t >= ?
 			UNION ALL
 			SELECT device, hop, ? AS message_type, toDateTime64(max(last_seen), 9) AS t FROM device_counters
 			WHERE tenant = ? AND bucket >= toStartOfFiveMinutes(?) AND last_seen >= ?
 			GROUP BY device, hop)
-		GROUP BY device, hop, message_type`, s.rules.Tenant, now.Add(-window), counterType, s.rules.Tenant, now.Add(-window), now.Add(-window))
+		GROUP BY device, hop, message_type`, s.rules.Tenant, now.Add(-window), now.Add(-window), counterType, s.rules.Tenant, now.Add(-window), now.Add(-window))
 	if err != nil {
 		httpError(w, err)
 		return
@@ -750,7 +805,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 			SELECT device, hop, message_type FROM hop_events
 			WHERE tenant = ? AND ts >= ? AND schema_fp != ''
 			GROUP BY device, hop, message_type
-			HAVING uniqExact(schema_fp) > 1)`, s.rules.Tenant, now.Add(-window))
+			HAVING uniqExact(schema_fp) > 1)`, s.rules.Tenant, now.Add(-min(window, shapeWindow)))
 	if err != nil {
 		httpError(w, err)
 		return
@@ -895,7 +950,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 	for _, rt := range s.rules.AllRoutes() {
 		rs = append(rs, routeHops{Name: rt.Name, Types: rt.Types, Hops: rt.Hops()})
 	}
-	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "routes": rs, "optional": s.optional(), "via": s.via(), "tap": blindList(blind), "window": window.String(), "expected": len(s.expected), "devices": out})
+	writeJSON(w, map[string]any{"tenant": s.rules.Tenant, "route": s.rules.Hops(), "routes": rs, "optional": s.optional(), "via": s.via(), "tap": blindList(blind), "window": window.String(), "retention_hours": int(s.maxWindow.Hours()), "expected": len(s.expected), "devices": out})
 }
 
 func (s *server) journey(w http.ResponseWriter, r *http.Request) {

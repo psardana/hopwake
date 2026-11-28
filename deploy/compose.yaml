@@ -86,6 +86,10 @@ services:
       JOURNEY_RULES: /etc/hopwake/journey-rules.yaml
       JOURNEY_CLICKHOUSE: clickhouse:9000
       JOURNEY_FLEET: /etc/hopwake/fleet.txt
+      # How long the store keeps hop events (and the longest window the view
+      # offers), and the raw spans they are copied from.
+      HOPWAKE_RETENTION: ${HOPWAKE_RETENTION:-30d}
+      HOPWAKE_RAW_RETENTION: ${HOPWAKE_RAW_RETENTION:-3d}
     volumes:
       - ${HOPWAKE_RULES:-../reference/journey-rules.yaml}:/etc/hopwake/journey-rules.yaml:ro
       - ${HOPWAKE_SCHEMAS:-../reference/schemas}:/etc/hopwake/schemas:ro

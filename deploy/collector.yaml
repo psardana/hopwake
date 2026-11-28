@@ -20,6 +20,8 @@ exporters:
     password: hopwake
     traces_table_name: otel_traces
     create_schema: true
+    # Only for creating the table: the journey service sets the retention
+    # from HOPWAKE_RAW_RETENTION every time it starts.
     ttl: 72h
     timeout: 10s
     retry_on_failure:

@@ -97,7 +97,7 @@ func markMissing(all []windowRecord, from time.Time) []windowRecord {
 func (s *server) windows(w http.ResponseWriter, r *http.Request) {
 	window := 15 * time.Minute
 	if q := r.URL.Query().Get("window"); q != "" {
-		if d, err := time.ParseDuration(q); err == nil && d > 0 && d <= 72*time.Hour {
+		if d, err := time.ParseDuration(q); err == nil && d > 0 && d <= s.maxWindow {
 			window = d
 		}
 	}
