@@ -468,22 +468,27 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	stats := []hopStat{}
+	// Per hop and message type, so each route counts only its own types.
+	type typedStat struct {
+		hopStat
+		msgType string
+	}
+	var typedStats []typedStat
 	srows, err := s.db.Query(ctx, `
-		SELECT hop, count(), max(ts), countIf(op = 'error'), argMaxIf(reason, ts, op = 'error') FROM hop_events
+		SELECT hop, message_type, count(), max(ts), countIf(op = 'error'), argMaxIf(reason, ts, op = 'error') FROM hop_events
 		WHERE tenant = ? AND device = ? AND ts >= ?
-		GROUP BY hop`, tenant, device, from)
+		GROUP BY hop, message_type`, tenant, device, from)
 	if err != nil {
 		httpError(w, err)
 		return
 	}
 	for srows.Next() {
-		var h hopStat
-		if err := srows.Scan(&h.Hop, &h.Count, &h.LastSeen, &h.Invalid, &h.InvalidReason); err != nil {
+		var h typedStat
+		if err := srows.Scan(&h.Hop, &h.msgType, &h.Count, &h.LastSeen, &h.Invalid, &h.InvalidReason); err != nil {
 			httpError(w, err)
 			return
 		}
-		stats = append(stats, h)
+		typedStats = append(typedStats, h)
 	}
 
 	// Counters cover every message, so they show how much the hop events
@@ -505,9 +510,6 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		counted[h] = [2]uint64{n, e}
-	}
-	for i := range stats {
-		stats[i].Counted, stats[i].CountedErrors = counted[stats[i].Hop][0], counted[stats[i].Hop][1]
 	}
 
 	shapes, err := s.shapeHistory(ctx, tenant, device, from)
@@ -545,7 +547,9 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	type routeView struct {
 		Name     string          `json:"name"`
 		Types    []string        `json:"types,omitempty"`
+		Hops     []string        `json:"hops"`
 		Readings int             `json:"readings"`
+		Seen     map[string]int  `json:"seen_types,omitempty"` // readings per message type
 		Verdict  verdict.Verdict `json:"verdict"`
 	}
 	var views []routeView
@@ -562,7 +566,13 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		subsets[rt.Name] = sub
-		views = append(views, routeView{Name: rt.Name, Types: rt.Types, Readings: len(sub), Verdict: s.judge(device, rt, sub, now, lastSeen, blind)})
+		seen := map[string]int{}
+		for _, j := range sub {
+			if j.Type != "" {
+				seen[j.Type]++
+			}
+		}
+		views = append(views, routeView{Name: rt.Name, Types: rt.Types, Hops: rt.Hops(), Readings: len(sub), Seen: seen, Verdict: s.judge(device, rt, sub, now, lastSeen, blind)})
 	}
 	sel := -1
 	if q := r.URL.Query().Get("route"); q != "" {
@@ -594,6 +604,41 @@ func (s *server) device(w http.ResponseWriter, r *http.Request) {
 	}
 	rt := routes[sel]
 	v := views[sel].Verdict
+	// Hop counts for the shown route: events whose type follows it. Counters
+	// carry no type, so they stand only for the untyped route.
+	byHop := map[string]*hopStat{}
+	stats := []hopStat{}
+	for _, t := range typedStats {
+		follows := len(rt.Types) == 0
+		for _, r := range s.rules.RoutesFor(t.msgType) {
+			if r.Name == rt.Name {
+				follows = true
+			}
+		}
+		if !follows {
+			continue
+		}
+		h := byHop[t.Hop]
+		if h == nil {
+			h = &hopStat{Hop: t.Hop}
+			byHop[t.Hop] = h
+		}
+		h.Count += t.Count
+		h.Invalid += t.Invalid
+		if t.LastSeen.After(h.LastSeen) {
+			h.LastSeen = t.LastSeen
+		}
+		if t.InvalidReason != "" {
+			h.InvalidReason = t.InvalidReason
+		}
+	}
+	for _, h := range byHop {
+		if len(rt.Types) == 0 {
+			h.Counted, h.CountedErrors = counted[h.Hop][0], counted[h.Hop][1]
+		}
+		stats = append(stats, *h)
+	}
+	sort.Slice(stats, func(i, j int) bool { return stats[i].Hop < stats[j].Hop })
 	js = subsets[rt.Name]
 	if len(js) > 50 {
 		js = js[:50]
@@ -730,6 +775,18 @@ type fleetDevice struct {
 	Invalid      uint64               `json:"invalid,omitempty"`      // hop events that broke a declared schema in the window
 	WrongValues  int                  `json:"wrong_values,omitempty"` // watched readings that broke a confirmed mapping
 	Watched      bool                 `json:"watched,omitempty"`
+	Channels     []channelState       `json:"channels,omitempty"` // one per route the device's readings follow
+}
+
+// channelState is a device's verdict on one route: its channel. A device
+// healthy on one channel can be stopped on another.
+type channelState struct {
+	Route        string        `json:"route"`
+	State        verdict.State `json:"state"`
+	StoppedAfter string        `json:"stopped_after,omitempty"`
+	StoppedAt    string        `json:"stopped_at,omitempty"`
+	Rejected     bool          `json:"rejected,omitempty"`
+	Last         time.Time     `json:"last"` // the latest sighting at any of the route's hops
 }
 
 // shapeWindow bounds the fleet's search for shape changes: over a long
@@ -871,6 +928,7 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 		// Judge each route on the readings whose types follow it, and show
 		// the worst.
 		best := fleetDevice{Device: device, State: verdict.Unknown}
+		var channels []channelState
 		for _, rt := range routes {
 			seen := map[string]time.Time{}
 			for msgType, hops := range typed[device] {
@@ -893,12 +951,19 @@ func (s *server) fleet(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			fd := s.quick(device, rt, seen, now, blind)
+			ch := channelState{Route: rt.Name, State: fd.State, StoppedAfter: fd.StoppedAfter, StoppedAt: fd.StoppedAt, Rejected: fd.Rejected}
+			for _, at := range seen {
+				if at.After(ch.Last) {
+					ch.Last = at
+				}
+			}
+			channels = append(channels, ch)
 			if best.State == verdict.Unknown || order[fd.State] < order[best.State] {
 				best = fd
 			}
 		}
 		best.LastSeen, best.Expected, best.ShapeChanged, best.Invalid = all, expected[device], changed[device], invalid[device]
-		best.WrongValues, best.Watched = wrong[device], watchedNow[device]
+		best.WrongValues, best.Watched, best.Channels = wrong[device], watchedNow[device], channels
 		out = append(out, best)
 	}
 
